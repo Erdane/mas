@@ -107,6 +107,8 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "transferts": {k: {"sortis": round(v["sortis"], 2), "rentres": round(v["rentres"], 2)}
                        for k, v in (budget.get("transferts") or {}).items()},
         "par_mois": budget.get("par_mois") or {},
+        "proches": ({k: round(v, 2) for k, v in budget["proches"].items()} if budget.get("proches") else None),
+        "loyers": budget.get("loyers") or [],
         "synthese": synthese,
         "alertes_extraction": nb_alertes,
         "controles": messages,
@@ -337,7 +339,26 @@ def _recap(d: dict) -> str:
     )
 
 
-def _categories(d: dict) -> str:
+def _notes_categories(d: dict, valeurs: dict[str, str] | None) -> str:
+    """Ce qui a été déduit plutôt que lu dans les libellés : à vérifier par l'utilisateur."""
+    notes = []
+    for loyer in d.get("loyers") or []:
+        notes.append(
+            f"Logement comprend {_eur(loyer['montant_mensuel'], 0)} par mois versés à "
+            f"{_texte('[' + loyer['beneficiaire'] + ']', valeurs)} : même montant {loyer['mois']} mois de suite, "
+            "c'est sans doute un loyer. Si ce n'en est pas un : <code>analyse.loyers_sans_libelle: non</code>."
+        )
+    proches = d.get("proches")
+    if proches and proches.get("rembourse", 0) >= 0.5:
+        notes.append(
+            f"Virements avec des proches : {_eur(proches['envoye'], 0)} envoyés et {_eur(proches['recu'], 0)} reçus "
+            f"par mois, dont {_eur(proches['rembourse'], 0)} de remboursements. Ceux-ci ne comptent ni en dépense ni "
+            f"en revenu : restent {_eur(proches['depense'], 0)} de dépense et {_eur(proches['revenu'], 0)} de revenu."
+        )
+    return "".join(f'<p class="note">{n}</p>' for n in notes)
+
+
+def _categories(d: dict, valeurs: dict[str, str] | None = None) -> str:
     cats = [c for c in d["categories"] if c["montant"] > 0]
     if not cats:
         return ""
@@ -365,7 +386,7 @@ def _categories(d: dict) -> str:
         '<details><summary>Voir les montants exacts</summary><div class="tableau"><table>'
         '<thead><tr><th>Catégorie</th><th class="num">Par mois</th><th class="num">Par an</th>'
         f'<th class="num">Part</th></tr></thead><tbody>{"".join(rangs)}</tbody></table></div></details>'
-        "</section>"
+        f"{_notes_categories(d, valeurs)}</section>"
     )
 
 
@@ -513,7 +534,7 @@ def construire_page(donnees: dict, valeurs: dict[str, str] | None = None) -> str
         _entete(donnees, personnelle)
         + _alerte(donnees)
         + _recap(donnees)
-        + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees)}</div>'
+        + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs)}</div>'
         + _par_mois(donnees)
         + _recurrents(donnees, valeurs)
         + _pied(donnees)
@@ -680,6 +701,7 @@ strong{font-weight:650}
   color:var(--encre-2);letter-spacing:.01em}
 .prose .intertitre:first-child{margin-top:0}
 .note{font-size:13px;color:var(--encre-3);max-width:68ch}
+.categories .note{margin-top:12px}
 
 .barres{list-style:none;margin:0;padding:0;display:grid;gap:2px}
 .ligne{display:grid;grid-template-columns:minmax(96px,38%) 1fr auto;align-items:center;gap:12px;

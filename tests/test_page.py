@@ -124,3 +124,14 @@ def test_pas_de_tableau_mois_par_mois_sur_un_seul_mois():
                           "lignes": [{"categorie": "logement", "montants": [1037.29]}]}
     assert 'class="par-mois"' not in construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE))
     assert 'class="par-mois"' not in construire_page(_donnees())             # ancien rapport.json
+
+
+def test_notes_loyer_probable_et_remboursements():
+    budget = _budget()
+    budget["loyers"] = [{"beneficiaire": "PERSONNE_1", "montant_mensuel": 850.0, "mois": 6}]
+    budget["proches"] = {"envoye": 100.0, "recu": 110.0, "rembourse": 80.0, "depense": 20.0, "revenu": 30.0}
+    donnees = donnees_rapport(budget, CLASSEMENTS, SYNTHESE)
+    anonyme = construire_page(donnees)
+    assert "c'est sans doute un loyer" in anonyme and "Personne 1" in anonyme and "Aline" not in anonyme
+    assert "dont 80\u00a0€ de remboursements" in anonyme
+    assert "Aline VERDIER" in construire_page(donnees, VALEURS)

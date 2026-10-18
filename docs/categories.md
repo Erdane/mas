@@ -31,9 +31,15 @@ Trois choses à garder en tête :
 - la taxe foncière : Impôts et taxes ;
 - les meubles, l'électroménager, le bricolage : Shopping.
 
-**À savoir :** si tu paies ton loyer par virement à un particulier, le nom de ton propriétaire est
-masqué. Le virement va dans Logement seulement si le libellé indique un loyer
-(`VIR PERMANENT [PERSONNE_1] LOYER`) ; sinon, il part dans Virements à des proches.
+**Loyer versé à un particulier :** le nom de ton propriétaire est masqué. L'IA range le virement
+dans Logement quand le libellé indique un loyer (`VIR PERMANENT [PERSONNE_1] LOYER`). Sinon, Mas le
+repère à sa régularité, après l'IA : des virements vers la même personne presque tous les mois (au
+moins 3 mois, et 6 sur 10 des mois couverts), d'un montant stable (écart de moins de 10 %) et d'au
+moins 300 € par mois. Ils passent alors dans Logement et le rapport le signale (« Loyer probable »).
+
+C'est une déduction : une pension ou une somme fixe versée chaque mois à un proche y ressemble. Dans
+la section `analyse` de `config.yaml`, `loyers_sans_libelle: non` coupe cette détection et
+`loyer_montant_min` change le seuil de 300 €.
 
 ## Virements à des proches
 
@@ -46,17 +52,25 @@ masqué. Le virement va dans Logement seulement si le libellé indique un loyer
 - les virements vers tes livrets ou tes propres comptes : mis à part, hors dépenses ;
 - un paiement à un commerçant passé par PayPal : la catégorie du commerçant.
 
-**Comment c'est compté :**
+**Comment c'est compté :** personne par personne (le même pseudonyme `[PERSONNE_n]` d'un mois à
+l'autre) et dans l'ordre des dates.
 
-- l'argent que tu envoies compte dans tes dépenses ;
-- l'argent que tu reçois compte dans tes revenus : Mas ne peut pas savoir s'il s'agit d'un cadeau,
-  d'un remboursement entre amis ou d'un paiement.
+- **Un remboursement annule le virement qu'il rembourse.** Tu envoies 60 € à quelqu'un, il t'en
+  renvoie 80 plus tard : 60 € sont un remboursement, ni dépense ni revenu ; les 20 € en plus
+  comptent comme un revenu.
+- **Rendre une avance n'est pas une dépense.** Un proche t'envoie 100 €, tu les lui rends le mois
+  suivant : ni revenu, ni dépense.
+- **Le reste** : l'argent envoyé sans retour compte dans tes dépenses, l'argent reçu sans envoi
+  préalable dans tes revenus.
+
+Le rapport donne le détail : envoyé, reçu, dont remboursements, puis ce qui reste en dépense et en
+revenu. Dans le tableau mois par mois, un remboursement vient en déduction le mois où il arrive.
 
 Pour sortir ces virements du budget, mets `virements_a_des_proches: a_part` dans la section
 `analyse` de `config.yaml` : ils sont alors montrés à part, ni en dépenses ni en revenus.
 
-**À savoir :** comme les noms sont masqués, un virement à une nounou, à un artisan ou à un
-propriétaire sans le mot « loyer » arrive ici aussi.
+**À savoir :** comme les noms sont masqués, un virement à une nounou ou à un artisan arrive ici
+aussi. Un loyer régulier, lui, est repéré et compté dans Logement (voir plus haut).
 
 ## Autres
 

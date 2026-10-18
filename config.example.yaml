@@ -23,8 +23,13 @@ analyse:
   # Tes comptes dans d'autres banques : IBAN, code BIC (ex. BOUSFRPP pour Boursorama), nom de la
   # banque… Les virements qui les mentionnent sont mis à part, sans déduction sur le nom.
   comptes_personnels: []
-  # Virements à des proches : depense (par défaut) ou a_part (montrés à part, hors dépenses)
+  # Virements à des proches : depense (par défaut) ou a_part (montrés à part, hors dépenses).
+  # Avec depense, un remboursement annule le virement qu'il rembourse (personne par personne).
   virements_a_des_proches: depense
+  # Loyer payé à un particulier sans le mot « loyer » : repéré à sa régularité (même personne presque
+  # tous les mois, montant stable d'au moins loyer_montant_min €) et compté dans Logement. non = coupé.
+  loyers_sans_libelle: detecter
+  loyer_montant_min: 300
 
 # --- Tes propres données : elles ne doivent JAMAIS sortir. ---
 # Elles sont recherchées en plus de la détection automatique, puis contrôlées

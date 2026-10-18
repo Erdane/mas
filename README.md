@@ -96,7 +96,7 @@ prioritaire. Il est ignoré par git, comme `config.yaml`.
 | Section | Rôle |
 |---|---|
 | `llm` | modèle d'analyse, au format LiteLLM `fournisseur/modele`. `anthropic/claude-haiku-4-5-20251001` est économique (1 $ / 5 $ par million de tokens en entrée / sortie) ; `anthropic/claude-sonnet-5-5` est plus fin et coûte le double (2 $ / 10 $) ; `anthropic/claude-opus-5-5` est le plus fin des trois et coûte quatre fois Haiku (4 $ / 20 $). Pour Sonnet et Opus 5.5 : **`temperature: null` et `max_tokens: 16000`**, car ils refusent la température et leur réflexion avant de répondre compte dans `max_tokens` |
-| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
+| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`), loyers payés sans le mot « loyer » (`loyers_sans_libelle`, `loyer_montant_min`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
 | `identite` | tes données qui ne doivent jamais sortir : noms (toutes les variantes écrites sur tes relevés), adresses, IBAN, numéros de compte, téléphones, e-mails, et `autres` (n° client, n° de contrat, proches à qui tu fais des virements…) |
 | `anonymisation` | modèle spaCy, types d'entités masquées, `liste_blanche` des marchands à ne pas masquer |
 | `verification` | nombre maximal de boucles anonymisation → vérification (voir [Les deux boucles de mas](#les-deux-boucles-de-mas)), vérificateur LLM local optionnel (Ollama) |
@@ -263,7 +263,12 @@ comptent comme des dépenses, sauf avec `virements_a_des_proches: a_part`.
 Le reste du calcul :
 
 - **remboursements :** un remboursement par carte vient en déduction des dépenses de sa catégorie ;
-- **revenus :** salaire et revenus, plus l'argent reçu de particuliers ;
+- **revenus :** salaire et revenus, plus l'argent reçu de particuliers, une fois les remboursements
+  déduits (un remboursement annule le virement qu'il rembourse, voir
+  [docs/categories.md](docs/categories.md#virements-à-des-proches)) ;
+- **loyer sans libellé :** des virements mensuels d'un montant stable vers une même personne
+  (300 € ou plus) sont comptés dans le logement et signalés comme « loyer probable »
+  (`analyse.loyers_sans_libelle`, `analyse.loyer_montant_min`) ;
 - **moyennes :** chaque montant est divisé par le nombre de mois couverts par les relevés ;
 - **catégories :** ce que l'IA range dans chaque catégorie (logement, crédits, virements à des
   proches, autres…) est expliqué dans [docs/categories.md](docs/categories.md) ;

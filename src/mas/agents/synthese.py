@@ -10,6 +10,7 @@ from collections import defaultdict
 import dspy
 
 from ..modeles import Classement, GroupeRecurrent, TransactionCategorisee
+from ..recurrence import cle_beneficiaire
 from .signatures import RedigerSynthese
 
 TITRES = {
@@ -34,6 +35,41 @@ def mois_lisible(n: float) -> str:
     return str(int(n)) if float(n).is_integer() else f"{n:.1f}".replace(".", ",")
 
 
+def solder_proches(transactions: list[TransactionCategorisee]) -> tuple[dict[str, float], dict[str, float]]:
+    """Virements avec des proches, personne par personne et dans l'ordre des dates.
+
+    L'argent qui revient après un virement (remboursement) annule ce virement au lieu de compter
+    comme un revenu ; seul ce qui dépasse la somme envoyée est un revenu. À l'inverse, rendre à un
+    proche l'argent qu'il t'avait avancé n'est pas une dépense. Renvoie les totaux et la dépense
+    nette de chaque mois (négative le mois d'un remboursement).
+    """
+    soldes: dict[str, float] = defaultdict(float)   # > 0 : la personne te doit ; < 0 : tu lui dois
+    totaux = {"envoye": 0.0, "recu": 0.0, "rembourse": 0.0, "depense": 0.0, "revenu": 0.0}
+    par_mois: dict[str, float] = defaultdict(float)
+    proches = [t for t in transactions if t.categorie == "virement_personnel"]
+    for t in sorted(proches, key=lambda t: t.date):
+        personne, mois = cle_beneficiaire(t.libelle), t.date[:7]
+        if t.montant < 0:
+            montant = -t.montant
+            rendu = min(montant, max(0.0, -soldes[personne]))     # tu rends une avance
+            totaux["envoye"] += montant
+            totaux["rembourse"] += rendu
+            totaux["revenu"] -= rendu
+            totaux["depense"] += montant - rendu
+            par_mois[mois] += montant - rendu
+            soldes[personne] += montant
+        else:
+            montant = t.montant
+            rembourse = min(montant, max(0.0, soldes[personne]))  # on te rend ce que tu avais envoyé
+            totaux["recu"] += montant
+            totaux["rembourse"] += rembourse
+            totaux["depense"] -= rembourse
+            totaux["revenu"] += montant - rembourse
+            par_mois[mois] -= rembourse
+            soldes[personne] -= montant
+    return totaux, par_mois
+
+
 def calculer_budget(
     transactions: list[TransactionCategorisee],
     groupes: list[GroupeRecurrent],
@@ -43,6 +79,7 @@ def calculer_budget(
     periode: str | None = None,
     proches_a_part: bool = False,
     couverture: dict[str, float] | None = None,
+    loyers: list[dict] | None = None,
 ) -> dict:
     """Moyennes mensuelles.
 
@@ -50,7 +87,8 @@ def calculer_budget(
       présents dans les opérations) ;
     - `transferts` : mouvements entre tes propres comptes, exclus des dépenses et des revenus ;
     - les remboursements (crédits d'une catégorie de dépense) viennent en déduction de la catégorie ;
-    - l'argent reçu de particuliers compte dans les revenus ;
+    - virements avec des proches : un remboursement annule le virement qu'il rembourse, seul
+      l'excédent reçu compte comme un revenu (voir `solder_proches`) ;
     - `couverture` (mois -> part des jours couverts par les relevés) signale les mois incomplets.
     """
     mois = sorted({t.date[:7] for t in transactions}) or ["?"]
@@ -79,7 +117,11 @@ def calculer_budget(
         flux["proches"]["sortis"] += debits.pop("virement_personnel", 0.0)
         flux["proches"]["rentres"] += credits.pop("virement_personnel", 0.0)
 
-    revenus = credits.pop("revenu", 0.0) - debits.pop("revenu", 0.0) + credits.pop("virement_personnel", 0.0)
+    proches, proches_par_mois = solder_proches(transactions)
+    if not proches_a_part and (debits.get("virement_personnel") or credits.get("virement_personnel")):
+        debits["virement_personnel"] = proches["depense"]
+        credits.pop("virement_personnel", None)
+    revenus = credits.pop("revenu", 0.0) - debits.pop("revenu", 0.0) + (0.0 if proches_a_part else proches["revenu"])
     depenses_cat: dict[str, float] = {}
     for categorie in set(debits) | set(credits):
         net = debits.get(categorie, 0.0) - credits.get(categorie, 0.0)
@@ -94,9 +136,12 @@ def calculer_budget(
         categorie = t.categorie
         if categorie in ("revenu", "epargne") or (proches_a_part and categorie == "virement_personnel"):
             continue
-        if categorie == "virement_personnel" and t.montant > 0:
-            continue                        # argent reçu d'un proche : un revenu, pas une dépense négative
+        if categorie == "virement_personnel":
+            continue                        # compté plus bas, remboursements déduits
         par_mois_cat[categorie][t.date[:7]] += -t.montant
+    if not proches_a_part:
+        for mois_, montant in proches_par_mois.items():
+            par_mois_cat["virement_personnel"][mois_] += montant
     # mois des relevés (couverture) et mois des opérations : aucune opération ne sort du tableau
     liste_mois = sorted(set(couverture) | {t.date[:7] for t in transactions}) if couverture else mois
     ordre = [c for c, _ in sorted(depenses_cat.items(), key=lambda x: -x[1])]
@@ -123,6 +168,9 @@ def calculer_budget(
         "reste_apres_obligatoire": revenus / n - total_oblig,
         "transferts": {k: {"sortis": v["sortis"] / n, "rentres": v["rentres"] / n}
                        for k, v in flux.items() if v["sortis"] or v["rentres"]},
+        "proches": ({k: v / n for k, v in proches.items()}
+                    if not proches_a_part and (proches["envoye"] or proches["recu"]) else None),
+        "loyers": loyers or [],
     }
 
 
@@ -145,6 +193,16 @@ def resume_markdown(budget: dict, classements: list[Classement]) -> str:
               "| Vers / depuis | Sorti | Rentré |", "|---|---:|---:|"]
         for cle, v in budget["transferts"].items():
             l.append(f"| {TRANSFERTS.get(cle, cle)} | {_eur(v['sortis'])} | {_eur(v['rentres'])} |")
+    if budget.get("proches"):
+        p = budget["proches"]
+        l += ["", "### Virements avec des proches (moyenne mensuelle)", "",
+              "Un remboursement annule le virement qu'il rembourse : seul l'excédent reçu est un revenu.", "",
+              "| Envoyé | Reçu | Dont remboursements | Compté en dépense | Compté en revenu |",
+              "|---:|---:|---:|---:|---:|",
+              f"| {_eur(p['envoye'])} | {_eur(p['recu'])} | {_eur(p['rembourse'])} | {_eur(p['depense'])} | {_eur(p['revenu'])} |"]
+    for loyer in budget.get("loyers", []):
+        l += ["", f"**Loyer probable :** {_eur(loyer['montant_mensuel'])} par mois versés à [{loyer['beneficiaire']}] "
+                  f"pendant {loyer['mois']} mois, comptés dans le logement (déduction : même montant chaque mois)."]
     for nature, titre in TITRES.items():
         groupes = budget["par_nature"].get(nature, [])
         if not groupes:
@@ -182,9 +240,9 @@ class Synthetiseur(dspy.Module):
         self.rediger = dspy.Predict(RedigerSynthese)
 
     def forward(self, transactions, recurrents, classements, transferts=None, nb_mois=None,
-                periode=None, proches_a_part=False, couverture=None) -> dspy.Prediction:
+                periode=None, proches_a_part=False, couverture=None, loyers=None) -> dspy.Prediction:
         budget = calculer_budget(transactions, recurrents, classements, transferts, nb_mois, periode,
-                                 proches_a_part, couverture)
+                                 proches_a_part, couverture, loyers)
         resume = resume_markdown(budget, classements)
         try:
             commentaire = self.rediger(resume_chiffre=resume).synthese

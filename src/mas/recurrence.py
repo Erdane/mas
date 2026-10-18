@@ -104,3 +104,44 @@ def detecter_recurrences(
             )
         )
     return sorted(resultats, key=lambda g: -g.montant_mensuel)
+
+
+def cle_beneficiaire(libelle: str) -> str:
+    """Personne concernée par un virement : son pseudonyme, sinon le premier mot significatif."""
+    jeton = re.search(r"\[(PERSONNE_\d+)\]", libelle)
+    return jeton.group(1) if jeton else cle_libelle(libelle, nb_mots=1)
+
+
+def reperer_loyers(
+    transactions: list[TransactionCategorisee], montant_min: float = 300.0, ecart_max: float = 0.1
+) -> tuple[list[TransactionCategorisee], list[dict]]:
+    """Loyer payé par virement sans le mot « loyer » : des virements vers une même personne, presque
+    tous les mois, d'un montant stable et élevé. Ils passent de « virement_personnel » à « logement ».
+    C'est une déduction (une pension versée chaque mois y ressemble) : elle est signalée dans le rapport."""
+    mois_couverts = {t.date[:7] for t in transactions if _date(t.date)}
+    par_personne: dict[str, list[TransactionCategorisee]] = defaultdict(list)
+    for t in transactions:
+        if t.categorie == "virement_personnel" and t.montant < 0 and _date(t.date):
+            par_personne[cle_beneficiaire(t.libelle)].append(t)
+
+    loyers, retenus = [], set()
+    for personne, liste in par_personne.items():
+        par_mois: dict[str, float] = defaultdict(float)
+        for t in liste:
+            par_mois[t.date[:7]] += -t.montant
+        montants = list(par_mois.values())
+        if len(montants) < 3 or len(montants) < 0.6 * len(mois_couverts):
+            continue
+        moyenne = statistics.mean(montants)
+        if moyenne < montant_min or statistics.pstdev(montants) / moyenne > ecart_max:
+            continue
+        retenus.add(personne)
+        loyers.append({"beneficiaire": personne, "montant_mensuel": round(moyenne, 2), "mois": len(montants)})
+    if not retenus:
+        return transactions, []
+    return [
+        t.model_copy(update={"categorie": "logement"})
+        if t.categorie == "virement_personnel" and t.montant < 0 and cle_beneficiaire(t.libelle) in retenus
+        else t
+        for t in transactions
+    ], loyers

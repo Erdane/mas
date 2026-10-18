@@ -110,6 +110,10 @@ class ConfigAnalyse(BaseModel):
     comptes_personnels: list[str] = Field(default_factory=list)
     # Virements à des proches : « depense » (par défaut) ou « a_part » (montrés à part)
     virements_a_des_proches: Literal["depense", "a_part"] = "depense"
+    # Loyer payé à un particulier sans le mot « loyer » : virements presque tous les mois vers une
+    # même personne, d'un montant stable d'au moins loyer_montant_min € → comptés dans Logement
+    loyers_sans_libelle: Literal["detecter", "non"] = "detecter"
+    loyer_montant_min: float = 300.0
 
 
 class Config(BaseModel):

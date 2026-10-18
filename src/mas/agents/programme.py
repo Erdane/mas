@@ -36,7 +36,7 @@ progression = logging.getLogger("mas.progression")
 
 from ..config import ConfigLLM, ConfigRecurrence
 from ..modeles import Classement, GroupeRecurrent, Transaction, TransactionCategorisee
-from ..recurrence import detecter_recurrences
+from ..recurrence import detecter_recurrences, reperer_loyers
 from .signatures import CategoriserLibelles, ClasserRecurrences, ExtraireTransactions
 
 MONTANT = re.compile(r"(?<![\d,.])-?\d{1,3}(?:[  .]\d{3})*,\d{2}(?![\d])")
@@ -122,6 +122,7 @@ class AnalyseReleve(dspy.Module):
         config_recurrence: ConfigRecurrence | None = None,
         tentatives_max: int = 2,
         taille_lot: int = 40,
+        loyer_montant_min: float | None = None,
     ):
         super().__init__()
         self.extracteur = dspy.ChainOfThought(ExtraireTransactions)
@@ -130,6 +131,7 @@ class AnalyseReleve(dspy.Module):
         self.config_recurrence = config_recurrence or ConfigRecurrence()
         self.tentatives_max = tentatives_max
         self.taille_lot = taille_lot
+        self.loyer_montant_min = loyer_montant_min  # None : pas de détection des loyers sans libellé
 
     # --- agent 1 : extraction avec boucle de correction ----------------------
     def extraire(self, pages: list[str]) -> tuple[list[Transaction], list[str]]:
@@ -229,6 +231,12 @@ class AnalyseReleve(dspy.Module):
         """Étapes 2 à 4 sur des opérations déjà extraites (par l'IA ou lues dans le tableau)."""
         alertes = list(alertes)
         categorisees = self.categoriser(transactions)
+        loyers: list[dict] = []
+        if self.loyer_montant_min is not None:
+            categorisees, loyers = reperer_loyers(categorisees, self.loyer_montant_min)
+            for l in loyers:
+                progression.info("  Loyer probable : %s € par mois à [%s], compté dans Logement",
+                                 l["montant_mensuel"], l["beneficiaire"])
         # agent 3 : déterministe
         groupes = detecter_recurrences(categorisees, self.config_recurrence)
         progression.info("[3/5] Dépenses récurrentes (calcul local, sans IA) : %d trouvée(s)", len(groupes))
@@ -242,4 +250,5 @@ class AnalyseReleve(dspy.Module):
             recurrents=groupes,
             classements=classements,
             alertes_extraction=alertes,
+            loyers=loyers,
         )

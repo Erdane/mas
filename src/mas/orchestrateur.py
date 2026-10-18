@@ -239,7 +239,11 @@ class Orchestrateur:
 
     # --- étapes LLM ----------------------------------------------------------
     def programme(self) -> AnalyseReleve:
-        programme = AnalyseReleve(self.config.recurrence)
+        analyse = self.config.analyse
+        programme = AnalyseReleve(
+            self.config.recurrence,
+            loyer_montant_min=analyse.loyer_montant_min if analyse.loyers_sans_libelle == "detecter" else None,
+        )
         chemin = Path(self.config.optimisation.programme_optimise)
         if chemin.exists():
             programme.load(str(chemin))
@@ -283,6 +287,7 @@ class Orchestrateur:
                 periode=periode,
                 proches_a_part=self.config.analyse.virements_a_des_proches == "a_part",
                 couverture=couverture,
+                loyers=analyse.get("loyers", []),
             )
         return dspy.Prediction(
             analyse=analyse,
