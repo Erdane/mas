@@ -1,0 +1,52 @@
+[project]
+name = "mas"
+version = "0.1.0"
+description = "Analyse tes relevés bancaires avec une IA, après les avoir anonymisés sur ton PC (DSPy/GEPA)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "dspy>=3.0",
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+    "spacy>=3.7",
+    "pdfplumber>=0.11",
+    "pymupdf>=1.24",
+    "pydantic>=2",
+    "pyyaml>=6",
+    "typer>=0.12",
+    "rich>=13",
+    "cryptography>=42",
+    "faker>=25",
+    "reportlab>=4",
+    "python-dotenv>=1.0",
+    "markdown-it-py>=3",
+]
+
+[project.optional-dependencies]
+# Deuxième détecteur de PII (modèle transformer, tourne sur CPU)
+gliner = ["gliner>=0.2"]
+# OCR pour les PDF scannés (nécessite aussi le binaire tesseract + la langue fra)
+ocr = ["pytesseract>=0.3", "pillow>=10"]
+# Suivi des runs d'optimisation
+mlflow = ["mlflow>=2.14"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+mas = "mas.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mas"]
+
+# Modèles de config.yaml et .env pour `mas init`, même installé sans cloner le dépôt
+[tool.hatch.build.targets.wheel.force-include]
+"config.example.yaml" = "mas/exemples/config.example.yaml"
+".env.example" = "mas/exemples/.env.example"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

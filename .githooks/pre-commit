@@ -1,0 +1,9 @@
+#!/bin/sh
+# Bloque le commit si un fichier personnel ou une de tes données s'y trouve (mas check-repo).
+# Activation, une fois par clone :  git config core.hooksPath .githooks
+if [ -x .venv/bin/mas ]; then MAS=.venv/bin/mas; else MAS=mas; fi
+if ! command -v "$MAS" >/dev/null 2>&1; then
+    echo "mas introuvable : active ton environnement (source .venv/bin/activate) puis recommence." >&2
+    exit 1
+fi
+exec "$MAS" check-repo --staged

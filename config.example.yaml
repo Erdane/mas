@@ -1,0 +1,98 @@
+# Copie ce fichier en config.yaml et adapte-le. config.yaml est ignoré par git.
+
+# --- LLM d'analyse (cloud). Il ne reçoit QUE du texte pseudonymisé et vérifié. ---
+# Format LiteLLM : "fournisseur/modele". Exemples :
+#   mistral/mistral-small-latest   (clé : MISTRAL_API_KEY)
+#   openai/gpt-4.1-mini            (clé : OPENAI_API_KEY)
+#   anthropic/claude-opus-5-5      (clé : ANTHROPIC_API_KEY ; temperature: null ; max_tokens: 16000 ; le plus fin)
+#   anthropic/claude-sonnet-5-5    (clé : ANTHROPIC_API_KEY ; temperature: null ; max_tokens: 16000 ; 2× moins cher)
+#   anthropic/claude-haiku-4-5-20251001  (clé : ANTHROPIC_API_KEY ; 4× moins cher, moins fin)
+llm:
+  modele: mistral/mistral-small-latest
+  temperature: 0.0               # mets null pour Claude Sonnet/Opus 5.5, qui refusent ce paramètre
+  max_tokens: 8000               # 16000 pour Claude Sonnet/Opus 5.5 : leur réflexion compte dedans
+
+# --- Ce qui compte comme dépense ---
+# L'argent qui change seulement de compte n'est pas une dépense : il est montré à part.
+# Les virements vers / depuis tes livrets sont repérés tout seuls quand ces livrets figurent sur le
+# même relevé (même montant, sens inverse, à 4 jours près).
+analyse:
+  # Virements vers un bénéficiaire qui porte ton nom (identite.noms) : c'est une déduction, pas une
+  # certitude (homonyme, proche, compte joint…). transfert = mis à part ; depense = compté en dépense.
+  virements_a_ton_nom: transfert
+  # Tes comptes dans d'autres banques : IBAN, code BIC (ex. BOUSFRPP pour Boursorama), nom de la
+  # banque… Les virements qui les mentionnent sont mis à part, sans déduction sur le nom.
+  comptes_personnels: []
+  # Virements à des proches : depense (par défaut) ou a_part (montrés à part, hors dépenses)
+  virements_a_des_proches: depense
+
+# --- Tes propres données : elles ne doivent JAMAIS sortir. ---
+# Elles sont recherchées en plus de la détection automatique, puis contrôlées
+# une dernière fois par le vérificateur avant tout envoi.
+identite:
+  noms: ["Jean Dupont"]          # nom complet, variantes ("DUPONT JEAN", "M DUPONT"...)
+  adresses: ["12 rue des Lilas"]
+  ibans: []
+  numeros_compte: []
+  telephones: []
+  emails: []
+  autres: []                     # n° client, n° de contrat, nom des enfants...
+
+anonymisation:
+  modele_spacy: fr_core_news_md  # fr_core_news_lg = un peu plus précis, plus lourd
+  seuil_score: 0.5
+  # Types d'entités pseudonymisées. LOCATION et ORGANIZATION sont volontairement
+  # absents : les marchands (EDF, NETFLIX...) et villes des achats doivent rester
+  # lisibles pour détecter les dépenses récurrentes. Ton adresse est couverte
+  # par FR_ADRESSE + la liste "identite".
+  entites:
+    - PERSON
+    - EMAIL_ADDRESS
+    - IBAN_CODE
+    - CREDIT_CARD
+    - FR_TELEPHONE
+    - FR_RIB
+    - FR_NIR
+    - FR_NUM_COMPTE
+    - FR_ADRESSE
+    - FR_CIVILITE_NOM
+    - FR_REFERENCE_MANDAT
+  # Mots que spaCy prend parfois pour des personnes mais qui sont des marchands.
+  liste_blanche: [LECLERC, AUCHAN, CARREFOUR, MONOPRIX, FRANPRIX, PICARD, DARTY,
+                  BOULANGER, DECATHLON, FNAC, NETFLIX, SPOTIFY, DEEZER, DISNEY,
+                  AMAZON, FREE, ORANGE, BOUYGUES, SFR, EDF, ENGIE, TOTAL, SNCF,
+                  RATP, NAVIGO, MAIF, MACIF, MAAF, AXA, GMF, BASIC FIT, LOYER,
+                  SALAIRE, PRLV, SEPA, VIR, CB, CARTE, RETRAIT, DAB]
+  gliner:
+    actif: false                 # pip install "mas[gliner]"
+    modele: urchade/gliner_multi_pii-v1
+    seuil: 0.5
+
+verification:
+  iterations_max: 3              # boucles anonymisation -> vérification
+  llm_local:
+    actif: false                 # vérification supplémentaire par un LLM local
+    modele: ollama_chat/qwen2.5:3b
+    api_base: http://localhost:11434
+
+coffre:
+  # Table pseudonyme -> valeur réelle, chiffrée (Fernet). La clé est lue dans
+  # la variable MAS_CLE_COFFRE, sinon générée dans ~/.mas/cle.key
+  chemin: ~/.mas/coffre.bin
+
+recurrence:
+  occurrences_min: 3             # abaissé automatiquement si peu de mois couverts
+  tolerance_intervalle: 0.25     # écart relatif toléré entre deux échéances
+  tolerance_montant: 0.30        # variation relative tolérée du montant
+
+optimisation:
+  # LLM de réflexion de GEPA : prends un modèle plus fort que celui d'analyse.
+  modele_reflexion: mistral/mistral-large-latest
+  temperature_reflexion: 1.0     # null pour Claude Opus 5.5
+  n_train: 24
+  n_val: 12
+  auto: light                    # light | medium | heavy
+  dossier_donnees: donnees/synthetiques
+  dossier_logs: artefacts/gepa_logs
+  programme_optimise: artefacts/programme_optimise.json
+  threads: 4

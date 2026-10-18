@@ -1,0 +1,61 @@
+# ─── Données personnelles : ne JAMAIS les versionner ────────────────────────────
+# `mas check-repo` contrôle aussi le contenu des fichiers avant chaque commit
+# (voir « Publier le code sans tes données » dans le README).
+
+# Réglages et secrets
+config.yaml
+.env
+.env.*
+!.env.example
+*.key
+*.bin
+
+# Tes relevés et tout ce que mas en tire
+releves/
+rapports/
+sortie_anonyme/
+donnees/
+artefacts/
+rapport*.md
+rapport*.html
+rapport*.json
+*_anonyme.*
+*.log
+
+# Relevés, exports bancaires et captures d'écran, où qu'ils soient
+# (une image pour la doc, faite sur des données inventées : git add -f docs/…)
+*.pdf
+*.zip
+*.csv
+*.ofx
+*.qif
+*.qfx
+*.xls
+*.xlsx
+*.ods
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.txt
+
+# ─── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.dspy_cache/
+
+# ─── Système et éditeurs ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
