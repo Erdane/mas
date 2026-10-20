@@ -1,5 +1,7 @@
 """Suivi d'une analyse : durées, tokens et coût estimé (sans réseau)."""
-from mas.suivi import consommation, duree_lisible, estimer_cout, montant_lisible, nombre_lisible
+import json
+
+from mas.suivi import ConsoModele, consommation, duree_lisible, estimer_cout, journaliser, montant_lisible, nombre_lisible
 
 HAIKU = "anthropic/claude-haiku-4-5-20251001"
 
@@ -24,3 +26,13 @@ def test_consommation_par_modele():
 def test_modele_inconnu_sans_tarif():
     assert estimer_cout("inconnu/modele-x", 10, 10) is None
     assert consommation({"inconnu/modele-x": [{"prompt_tokens": 5}]})[0].cout_usd is None
+
+
+def test_journal_ia_sans_donnees_des_releves(tmp_path):
+    fichier = tmp_path / "sous" / "ia-usage.jsonl"
+    journaliser([ConsoModele(HAIKU, 3, 2000, 500, 0.0045)], fichier)
+    journaliser([ConsoModele("modele/inconnu", 1, 10, 5, None)], fichier)
+    lignes = [json.loads(l) for l in fichier.read_text(encoding="utf-8").splitlines()]
+    assert [l["modele"] for l in lignes] == [HAIKU, "modele/inconnu"]
+    assert set(lignes[0]) == {"ts", "modele", "appels", "entree", "sortie", "cout_usd"}
+    assert lignes[0]["cout_usd"] == 0.0045 and lignes[1]["cout_usd"] is None

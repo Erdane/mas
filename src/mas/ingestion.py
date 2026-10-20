@@ -15,6 +15,7 @@ from typing import Iterator
 
 import pdfplumber
 
+from .lecteur_deduit import LecteurDeduit
 from .releve import LecteurReleve, ReleveStructure
 
 TAILLE_MAX_ZIP = 500 * 1024 * 1024  # protection contre les "zip bombs"
@@ -33,6 +34,7 @@ class Document:
     pages: list[Page] = field(default_factory=list)
     # Opérations lues directement dans le tableau (voir releve.py) ; None : extraction par l'IA
     structure: ReleveStructure | None = None
+    raison: str = ""        # pourquoi le tableau n'a pas été reconnu (montré à l'utilisateur)
 
     @property
     def texte(self) -> str:
@@ -76,9 +78,11 @@ def lire_pdf(chemin: str | Path) -> Document:
     chemin = Path(chemin)
     doc = Document(nom=chemin.name)
     lecteur = LecteurReleve()
+    deduit = LecteurDeduit()      # autres mises en page : colonnes déduites des opérations, vérifiées au centime
     with pdfplumber.open(chemin) as pdf:
         for i, page in enumerate(pdf.pages):
             lecteur.lire_page(page, i)
+            deduit.ajouter_page(page, i)
             tableaux = page.find_tables()
             boites = [t.bbox for t in tableaux]
             if boites:
@@ -100,7 +104,9 @@ def lire_pdf(chemin: str | Path) -> Document:
                     texte, ocr = texte_ocr.strip(), True
             doc.pages.append(Page(numero=i + 1, texte=texte, ocr=ocr))
             page.flush_cache()
-    doc.structure = lecteur.resultat()
+    deduit.ocr = any(p.ocr for p in doc.pages)
+    doc.structure = lecteur.resultat() or deduit.resultat()
+    doc.raison = "" if doc.structure else deduit.raison
     if doc.structure is not None:
         # Tableau reconnu : une ligne par opération, colonnes Débit et Crédit séparées, plutôt
         # que la ligne unique fourre-tout que pdfplumber produit sur certains relevés (BRED…)

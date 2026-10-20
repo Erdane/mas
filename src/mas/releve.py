@@ -99,13 +99,15 @@ class Compte:
         """Vérifie la lecture : totaux imprimés, sinon soldes début + crédits − débits = fin."""
         debits = round(sum(o.debit or 0 for o in self.operations), 2)
         credits = round(sum(o.credit or 0 for o in self.operations), 2)
+        # Au centime près : moins d'un demi-centime d'écart (0,01 passerait, l'arrondi des flottants
+        # faisant 1 524,46 − 1 524,45 = 0,00999…)
         if self.totaux is not None:
-            ok = abs(debits - self.totaux[0]) < 0.01 and abs(credits - self.totaux[1]) < 0.01
+            ok = abs(debits - self.totaux[0]) < 0.005 and abs(credits - self.totaux[1]) < 0.005
             return ok, (f"opérations lues {debits:.2f} € au débit et {credits:.2f} € au crédit, "
                         f"total imprimé {self.totaux[0]:.2f} € et {self.totaux[1]:.2f} €")
         if self.solde_debut is not None and self.solde_fin is not None:
             attendu = round(self.solde_debut[1] + credits - debits, 2)
-            ok = abs(attendu - self.solde_fin[1]) < 0.01
+            ok = abs(attendu - self.solde_fin[1]) < 0.005
             return ok, f"solde calculé {attendu:.2f} €, solde imprimé {self.solde_fin[1]:.2f} €"
         return None, "pas de total ni de solde imprimé pour contrôler"
 
@@ -114,6 +116,7 @@ class Compte:
 class ReleveStructure:
     comptes: list[Compte] = field(default_factory=list)
     pages_rendues: dict[int, str] = field(default_factory=dict)   # index de page -> texte reconstruit
+    lecture: str = "en-tête Date / Débit / Crédit"                  # comment le tableau a été lu (rapport, `mas structure`)
 
     @property
     def principal(self) -> Compte | None:
@@ -341,3 +344,4 @@ class LecteurReleve:
         if principal is None or not principal.operations:
             return None
         return self.releve
+

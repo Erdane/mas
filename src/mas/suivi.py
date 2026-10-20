@@ -7,7 +7,15 @@ tarifs publics connus de LiteLLM ; la console du fournisseur fait foi.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Une ligne par modèle et par analyse : date, modèle, appels, tokens, coût. Jamais de données des
+# relevés. Lu par Muninn (projets/muninn) pour afficher le coût de l'IA.
+JOURNAL_IA = Path(os.environ.get("MAS_JOURNAL_IA", "~/.mas/ia-usage.jsonl")).expanduser()
 
 
 def duree_lisible(secondes: float) -> str:
@@ -59,3 +67,17 @@ def consommation(usage_par_modele: dict[str, list[dict]]) -> list[ConsoModele]:
         sortie = sum(int(a.get("completion_tokens") or 0) for a in appels)
         lignes.append(ConsoModele(modele, len(appels), entree, sortie, estimer_cout(modele, entree, sortie)))
     return lignes
+
+
+def journaliser(conso: list[ConsoModele], fichier: Path | None = None) -> None:
+    """Ajoute la consommation d'une analyse au journal. Une erreur d'écriture n'arrête pas l'analyse."""
+    fichier = fichier or JOURNAL_IA
+    quand = datetime.now(timezone.utc).isoformat()
+    try:
+        fichier.parent.mkdir(parents=True, exist_ok=True)
+        with fichier.open("a", encoding="utf-8") as f:
+            for c in conso:
+                f.write(json.dumps({"ts": quand, "modele": c.modele, "appels": c.appels, "entree": c.tokens_entree,
+                                    "sortie": c.tokens_sortie, "cout_usd": c.cout_usd}) + "\n")
+    except OSError:
+        pass

@@ -1,0 +1,47 @@
+name: Banque non reconnue
+description: Mes relevés partent à l'IA au lieu d'être lus directement (« mise en page non reconnue »).
+title: "Banque non reconnue : "
+labels: ["banque"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci ! Avec ces informations, la mise en page de ta banque est reproduite dans un relevé factice,
+        puis mas apprend à la lire directement, pour toi et pour les suivants.
+        **Ne joins jamais un vrai relevé**, ni une capture d'écran : la sortie de `mas structure` suffit.
+  - type: input
+    id: banque
+    attributes:
+      label: Banque
+      description: Et le type de document si ce n'est pas le relevé mensuel du compte courant.
+      placeholder: "ex. Crédit Agricole, relevé mensuel du compte courant"
+    validations:
+      required: true
+  - type: input
+    id: raison
+    attributes:
+      label: Raison affichée
+      description: La colonne « Lecture » du tableau « Tes relevés », dans `mas analyser`.
+      placeholder: "ex. par l'IA : mise en page non reconnue (3 colonnes de montants : mise en page non reconnue)"
+    validations:
+      required: true
+  - type: textarea
+    id: structure
+    attributes:
+      label: Sortie de `mas structure`
+      description: "`mas structure releves/un-releve.pdf` : un seul relevé suffit."
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Ce que tu vois sur le relevé (facultatif)
+      description: "Les intitulés des colonnes, où sont les soldes, s'il y a plusieurs comptes… Sans aucune donnée personnelle."
+  - type: checkboxes
+    id: relu
+    attributes:
+      label: Données personnelles
+      options:
+        - label: J'ai relu ce ticket ; il ne contient ni nom, ni adresse, ni numéro de compte, ni libellé, ni montant.
+          required: true

@@ -114,13 +114,27 @@ def _modele_exemple(nom: str) -> Path | None:
 
 
 def _resume(docs) -> None:
-    table = Table(title="Anonymisation locale")
+    """Pour chaque relevé : comment il est lu (directement, ou par l'IA et pourquoi) et le contrôle au centime."""
+    from rich.text import Text
+
+    from .orchestrateur import Orchestrateur
+
+    lectures = Orchestrateur.lectures(docs)
+    table = Table(title="Tes relevés")
     table.add_column("Document")
     table.add_column("Pages", justify="right")
-    table.add_column("Remplacements", justify="right")
-    for d in docs:
-        table.add_row(d.nom, str(len(d.pages)), str(d.nb_remplacements))
+    table.add_column("Lecture")
+    table.add_column("Contrôle")
+    table.add_column("Anonymisés", justify="right")
+    for d, l in zip(docs, lectures):
+        couleur = "green" if l["ok"] else "red" if l["ok"] is False else "yellow"
+        table.add_row(d.nom, str(l["pages"]), Text(l["lecture"]), Text(l["controle"], style=couleur),
+                      str(d.nb_remplacements))
     console.print(table)
+    if any(not l["directe"] for l in lectures):
+        console.print("[yellow]Mise en page non reconnue : ces relevés seront lus par l'IA (payant, et non "
+                      "vérifiable au centime).[/yellow] Pour qu'ils soient lus directement la prochaine fois : "
+                      "[bold]mas structure[/bold], puis « Ta banque n'est pas reconnue ? » dans le README.")
 
 
 @app.command()
@@ -243,23 +257,32 @@ def analyser(
     duree_anonymisation = time.perf_counter() - debut
     _resume(docs)
 
-    extrait = docs[0].pages[0][:800] if docs and docs[0].pages else ""
+    # Ce qui part réellement : des relevés lus directement, seulement les libellés et les montants des
+    # opérations (catégorisation, synthèse) ; des autres, les pages entières, que l'IA devra lire.
+    lus = [d for d in docs if d.operations is not None]
+    a_lire = [d for d in docs if d.operations is None]
+    envoi = []
+    if lus:
+        envoi.append(f"les libellés et montants pseudonymisés de {sum(len(d.operations) for d in lus)} "
+                     "opération(s) lues directement")
+    if a_lire:
+        envoi.append(f"{sum(len(d.pages) for d in a_lire)} page(s) pseudonymisée(s), que l'IA lira")
+    if a_lire and a_lire[0].pages:
+        extrait = a_lire[0].pages[0][:800]
+    else:
+        extrait = "\n".join(f"{o.date}  {o.libelle}  {o.montant:.2f}" for d in lus for o in d.operations[:8])[:800]
     console.print("[dim]Extrait de ce qui sera envoyé :[/dim]")
-    console.print(extrait, highlight=False)
-    nb_pages = sum(len(d.pages) for d in docs)
-    if not oui and not typer.confirm(
-        f"\nEnvoyer {nb_pages} page(s) pseudonymisée(s) à {cfg.llm.modele} ?"
-    ):
+    console.print(extrait, highlight=False, markup=False)
+    if not oui and not typer.confirm(f"\nEnvoyer à {cfg.llm.modele} : {' et '.join(envoi)} ?"):
         raise typer.Exit(0)
 
     import dspy
     from dspy.utils.exceptions import LMError
 
     from .page import donnees_rapport, ecrire_pages
-    from .suivi import consommation
+    from .suivi import consommation, journaliser
 
-    console.print(f"\n[bold]Analyse en cours[/bold] ({nb_pages} page(s), {cfg.llm.modele}) : "
-                  "chaque étape s'affiche ci-dessous.")
+    console.print(f"\n[bold]Analyse en cours[/bold] ({cfg.llm.modele}) : chaque étape s'affiche ci-dessous.")
     debut = time.perf_counter()
     # Ne compte que les appels réellement facturés (pas les réponses servies par le cache DSPy)
     with dspy.track_usage() as compteur:
@@ -272,6 +295,7 @@ def analyser(
             raise typer.Exit(1)
     duree_analyse = time.perf_counter() - debut
     conso = consommation(compteur.usage_data)
+    journaliser(conso)
     appels_factures = sum(c.appels for c in conso)
     # L'historique du LM garde aussi les réponses servies par le cache : la différence les compte
     reponses_cache = max(0, len(getattr(orchestrateur.lm, "history", [])) - appels_factures)
@@ -292,7 +316,7 @@ def analyser(
     }
     alertes = list(resultat.analyse.alertes_extraction)
     donnees = donnees_rapport(resultat.budget, resultat.analyse.classements, resultat.commentaire,
-                              alertes, traitement)
+                              alertes, traitement, lectures=resultat.lectures)
     html, html_anonyme, _ = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
     for message in donnees["controles"]:
         console.print(f"[yellow]⚠ {message}[/yellow]")
@@ -392,6 +416,21 @@ def coffre(config: Path = OptionConfig):
     for jeton, valeur in sorted(c.valeurs.items()):
         table.add_row(f"[{jeton}]", valeur)
     console.print(table)
+
+
+@app.command()
+def structure(
+    entree: Path = typer.Argument(..., help="PDF ou dossier de PDF"),
+    tous: bool = typer.Option(False, "--tous", help="Décrire aussi les relevés que mas lit déjà"),
+):
+    """Décrit la mise en page des relevés que mas ne lit pas directement, sans aucune donnée.
+
+    Intitulés de colonnes (pris dans une liste fixe de mots génériques), positions et types des éléments
+    (date, montant, texte) : de quoi apprendre une nouvelle banque à mas. Rien n'est envoyé nulle part.
+    """
+    from .structure import decrire
+    for ligne in decrire(entree, tous):
+        console.print(ligne, markup=False, highlight=False, soft_wrap=True)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,22 @@ class DocumentAnonymise:
     operations: list[OperationAnonyme] | None = None    # None : pas de tableau reconnu (extraction IA)
     periodes: list[tuple[date, date]] = field(default_factory=list)
     controles: list[tuple[bool | None, str]] = field(default_factory=list)   # un par compte
+    lecture: str = ""          # comment le tableau a été lu (vide : par l'IA)
+    raison: str = ""           # pourquoi il n'a pas été reconnu
+
+
+def lectures_markdown(lectures: list[dict]) -> str:
+    if not lectures:
+        return ""
+    lignes = ["", "## Comment tes relevés ont été lus", "",
+              "| Relevé | Pages | Lecture | Contrôle |", "|---|---|---|---|"]
+    for l in lectures:
+        nom = f"{l['releve']}" + (f" ({l['periode']})" if l["periode"] else "")
+        lignes.append(f"| {nom} | {l['pages']} | {l['lecture']} | {l['controle']} |")
+    if any(not l["directe"] for l in lectures):
+        lignes += ["", "_Un relevé lu par l'IA n'est pas vérifiable au centime. Pour qu'il soit lu directement : "
+                       "`mas structure`, puis « Ta banque n'est pas reconnue ? » dans le README._"]
+    return "\n".join(lignes) + "\n"
 
 
 def _simple(texte: str) -> str:
@@ -102,7 +118,7 @@ class Orchestrateur:
             originales = [p.texte for p in doc.pages]
             res = [self.anonymiseur.anonymiser(t) for t in originales]
             resultats.append(
-                DocumentAnonymise(doc.nom, [r.texte for r in res], originales, sum(r.nb for r in res))
+                DocumentAnonymise(doc.nom, [r.texte for r in res], originales, sum(r.nb for r in res), raison=doc.raison)
             )
 
         # Boucle anonymisation -> vérification. La vérification est faite après
@@ -166,6 +182,28 @@ class Orchestrateur:
         resultat.operations = operations
         resultat.periodes = doc.structure.periodes()
         resultat.controles = [c.controle() for c in doc.structure.comptes]
+        resultat.lecture = doc.structure.lecture
+
+    @staticmethod
+    def lectures(documents: list[DocumentAnonymise]) -> list[dict]:
+        """Comment chaque relevé a été lu, pour l'utilisateur (avant l'envoi) et pour le rapport. Les relevés
+        sont numérotés dans l'ordre, sans leur nom de fichier (le rapport anonyme peut être partagé)."""
+        lignes = []
+        for i, d in enumerate(documents, 1):
+            periodes = [p for p in d.periodes if p[0] and p[1]]
+            periode = (f"du {min(a for a, _ in periodes):%d/%m/%Y} au {max(b for _, b in periodes):%d/%m/%Y}"
+                       if periodes else "")
+            if d.operations is None:
+                lignes.append({"releve": i, "pages": len(d.pages), "periode": periode, "directe": False,
+                               "lecture": f"par l'IA : mise en page non reconnue ({d.raison or 'raison inconnue'})",
+                               "controle": "non vérifiable au centime", "ok": None})
+                continue
+            ok, detail = d.controles[0] if d.controles else (None, "")
+            controle = ("juste au centime" if ok else f"écart : {detail}" if ok is False
+                        else "impossible : ni total ni solde imprimé")
+            lignes.append({"releve": i, "pages": len(d.pages), "periode": periode, "directe": True,
+                           "lecture": f"directe : {d.lecture}", "controle": controle, "ok": ok})
+        return lignes
 
     def charger_documents(self, entree: str | Path) -> list[DocumentAnonymise]:
         return self.anonymiser(list(iter_documents(entree)))
@@ -289,12 +327,15 @@ class Orchestrateur:
                 couverture=couverture,
                 loyers=analyse.get("loyers", []),
             )
+        lectures = self.lectures(documents)
+        section = lectures_markdown(lectures)        # écrite ici, en Python : jamais envoyée à l'IA
         return dspy.Prediction(
             analyse=analyse,
             transferts=transferts,
-            rapport_anonyme=synthese.rapport,
+            lectures=lectures,
+            rapport_anonyme=synthese.rapport + section,
             # Dé-pseudonymisation 100 % locale : les vrais noms ne sont remis qu'ici
-            rapport=self.coffre.depseudonymiser(synthese.rapport),
+            rapport=self.coffre.depseudonymiser(synthese.rapport) + section,
             # Pour la page HTML : chiffres calculés en Python + commentaire (avec pseudonymes)
             budget=synthese.budget,
             commentaire=synthese.commentaire,

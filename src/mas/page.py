@@ -76,7 +76,8 @@ ICONE_ALERTE = (
 # ---------------------------------------------------------------- données
 
 def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | list[str] = 0,
-                    traitement: dict | None = None, genere_le: datetime | None = None) -> dict:
+                    traitement: dict | None = None, genere_le: datetime | None = None,
+                    lectures: list[dict] | None = None) -> dict:
     """Données de la page (sérialisables en JSON). Les libellés gardent leurs pseudonymes.
     `alertes` : nombre de pages en écart (extraction par l'IA) ou liste de messages de contrôle."""
     messages = [a for a in alertes if isinstance(a, str) and a.startswith("Relevé ")] if isinstance(alertes, list) else []
@@ -113,6 +114,7 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "alertes_extraction": nb_alertes,
         "controles": messages,
         "traitement": traitement,
+        "lectures": lectures or [],       # comment chaque relevé a été lu (voir Orchestrateur.lectures)
     }
 
 
@@ -499,6 +501,28 @@ def _recurrents(d: dict, valeurs: dict[str, str] | None) -> str:
             f"que tu peux t'en passer ou non.</p>{corps}</section>")
 
 
+def _lectures(d: dict) -> str:
+    """Comment chaque relevé a été lu : directement (contrôlé au centime) ou par l'IA, et pourquoi."""
+    lectures = d.get("lectures") or []
+    if not lectures:
+        return ""
+    rangs = []
+    for l in lectures:
+        periode = f'<span class="variable">{html.escape(l["periode"])}</span>' if l.get("periode") else ""
+        etat = "juste" if l.get("ok") else "ecart" if l.get("ok") is False else "inconnu"
+        rangs.append(f'<tr><td>{l["releve"]}{periode}</td><td class="num">{l["pages"]}</td>'
+                     f'<td>{html.escape(l["lecture"])}</td><td class="{etat}">{html.escape(l["controle"])}</td></tr>')
+    conseil = ('<p class="intro">Un relevé lu par l\'IA n\'est pas vérifiable au centime. Pour qu\'il soit lu '
+               "directement : <code>mas structure</code>, puis « Ta banque n'est pas reconnue ? » dans le README.</p>"
+               if any(not l.get("directe") for l in lectures) else "")
+    return ('<section class="lectures" aria-labelledby="t-lec">'
+            '<h2 id="t-lec">Comment tes relevés ont été lus</h2>'
+            '<p class="intro">Lus directement, les relevés sont vérifiés au centime avec les soldes ou les totaux '
+            f"imprimés par ta banque.</p>{conseil}"
+            '<div class="tableau"><table><thead><tr><th>Relevé</th><th class="num">Pages</th><th>Lecture</th>'
+            f"<th>Contrôle</th></tr></thead><tbody>{''.join(rangs)}</tbody></table></div></section>")
+
+
 def _pied(d: dict) -> str:
     lignes = []
     quand = _date_lisible(d.get("genere_le", ""))
@@ -537,6 +561,7 @@ def construire_page(donnees: dict, valeurs: dict[str, str] | None = None) -> str
         + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs)}</div>'
         + _par_mois(donnees)
         + _recurrents(donnees, valeurs)
+        + _lectures(donnees)
         + _pied(donnees)
     )
     return (
@@ -752,6 +777,11 @@ td.pourquoi{color:var(--encre-2)}
 .groupe td:nth-child(3){white-space:nowrap}
 .variable{display:block;font-size:12px;color:var(--encre-3)}
 .vide{margin-top:16px;color:var(--encre-2)}
+.lectures{margin-top:clamp(40px,6vw,72px);padding-top:clamp(32px,4vw,48px);border-top:1px solid var(--filet)}
+.lectures .intro{margin-bottom:8px}
+.lectures td.juste{color:var(--encre-2)}
+.lectures td.ecart{color:var(--critique);font-weight:600}
+.lectures td.inconnu{color:var(--alerte)}
 
 .masque{display:inline-flex;align-items:center;gap:4px;padding:0 7px 0 5px;border-radius:999px;
   background:var(--lagon-voile);color:var(--lagon);font-family:var(--police-ui);font-size:.88em;

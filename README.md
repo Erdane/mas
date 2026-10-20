@@ -53,7 +53,7 @@ construire un budget.
 9. [Optimisation avec GEPA](#optimisation-avec-gepa)
 10. [Tests](#tests-sans-clé-api)
 11. [Structure](#structure)
-12. [Adapter à ta banque](#adapter-à-ta-banque)
+12. [Ta banque n'est pas reconnue ?](#ta-banque-nest-pas-reconnue-)
 13. [Limites](#limites)
 14. [Licence](#licence)
 
@@ -161,8 +161,10 @@ mas analyser releves/
 mas anonymise à nouveau puis vérifie (voir [Les deux boucles de mas](#les-deux-boucles-de-mas)) :
 
 - **S'il reste une donnée personnelle**, l'envoi est **bloqué** et mas dit laquelle.
-- **Sinon**, il affiche un extrait de ce qui partira et demande confirmation. `--oui` saute cette
-  question.
+- **Sinon**, il affiche le tableau « Tes relevés » (pour chacun : lu directement et contrôlé au centime,
+  ou lu par l'IA et pourquoi), un extrait de ce qui partira, puis demande confirmation en disant ce qui
+  part : les libellés et montants des opérations lues directement, et les pages entières des relevés
+  non reconnus. `--oui` saute cette question.
 
 Pendant l'analyse, chaque étape s'affiche :
 
@@ -223,24 +225,48 @@ explorer.exe "$(wslpath -w rapports/rapport.html)"
 
 ## Comment mas lit tes relevés
 
-**Tableau reconnu : lecture directe, sans IA.** Quand le tableau des opérations a un en-tête
-« Date … Débit … Crédit » (la plupart des banques françaises), mas repère la position des colonnes
-et relit chaque opération ligne par ligne : date, libellé (même sur deux lignes), débit, crédit,
-date de valeur. Cette lecture :
+**Peu importe ta banque :** mas lit un relevé d'après sa mise en page, pas d'après le nom de la banque, et
+vérifie sa lecture au centime avec les soldes ou les totaux imprimés. Avant tout envoi, `mas analyser`
+affiche pour chaque relevé comment il est lu et le résultat de ce contrôle ; le rapport reprend ce tableau
+(« Comment tes relevés ont été lus »).
 
-- **ne dépend pas du dessin du tableau :** certains relevés (la BRED, par exemple) sont lus par
+| Ordre | Lecture | Quand | Vérification |
+|---|---|---|---|
+| 1 | **directe, d'après l'en-tête** (`releve.py`) | l'en-tête « Date … Débit … Crédit » donne la position des colonnes (la BRED, beaucoup de banques) | totaux ou soldes imprimés |
+| 2 | **directe, colonnes déduites** (`lecteur_deduit.py`) | pas d'en-tête exploitable, mais des lignes qui commencent par une date et finissent par un montant | retenue seulement si elle tombe juste au centime |
+| 3 | **par l'IA**, page par page | aucune des deux, ou contrôle faux ; la raison s'affiche | aucune vérification au centime possible |
+
+**Colonnes déduites.** Les montants sont alignés à droite : leurs bords droits se regroupent en une, deux ou
+trois colonnes. mas essaie les lectures possibles et garde la seule qui tombe juste au centime, si bien
+qu'une mauvaise hypothèse ne passe jamais :
+
+| Mise en page | Exemple de ligne | Vérifiée par |
+|---|---|---|
+| deux colonnes, débit puis crédit (ou l'inverse) | `05/09/2026  CARTE BOULANGERIE  05/09/2026  12,40` | solde de début + crédits − débits = solde de fin |
+| une colonne de montants signés | `04/09/26  VIREMENT RECU  +1 900,00` | idem |
+| débit, crédit, solde après chaque opération | `03.09  ABONNEMENT  10,99  489,01` | chaque ligne avec la précédente |
+| montant signé, solde après chaque opération | `5 sept. 2026  Carte Librairie  -18,90 €  481,10 €` | idem |
+
+Les dates peuvent être courtes (« 05.09 », l'année vient de la période du relevé), complètes
+(« 05/09/2026 », « 05/09/26 ») ou en lettres (« 5 sept. 2026 »). Un libellé sur plusieurs lignes est recollé,
+une date citée dans le libellé (« CARTE 01/09 … ») y reste, et les mots collés par le PDF (« SOLDEAU »,
+« 21sept. ») sont reconnus.
+
+**Ce que garantit la lecture directe :**
+
+- **elle ne dépend pas du dessin du tableau :** certains relevés (la BRED, par exemple) sont lus par
   l'extraction de tableaux classique comme une seule ligne fourre-tout, où plus aucun montant n'est
   rattaché à son libellé ;
-- **sépare les comptes d'un même relevé :** seul le compte courant est analysé ; les livrets
-  imprimés à la suite (LDD, Livret A…) servent à reconnaître ton épargne ;
-- **est contrôlée au centime :** la somme des opérations lues est comparée au « Total des
-  mouvements » imprimé par la banque (ou, à défaut, solde précédent + crédits − débits = nouveau
-  solde). En cas d'écart, le rapport le signale en tête ;
-- **donne la bonne période :** le nombre de mois vient des dates des relevés (solde précédent →
-  nouveau solde), arrondi au demi-mois.
+- **elle est contrôlée au centime,** et un écart est signalé en tête du rapport ;
+- **elle donne la bonne période :** le nombre de mois vient des soldes de début et de fin, arrondi au
+  demi-mois ;
+- **elle sépare les comptes d'un même relevé** (lecture d'après l'en-tête) : seul le compte courant est
+  analysé, les livrets imprimés à la suite (LDD, Livret A…) servent à reconnaître ton épargne. Les colonnes
+  déduites lisent un seul compte par relevé : un livret imprimé à la suite fait échouer le contrôle, et
+  l'IA prend le relais.
 
-**Tableau non reconnu : extraction par l'IA**, page par page, avec la boucle de correction
-décrite plus bas.
+**Extraction par l'IA**, page par page, avec la boucle de correction décrite plus bas : seulement pour les
+relevés que ni l'une ni l'autre lecture ne reconnaît.
 
 ### Ce qui compte comme dépense
 
@@ -387,6 +413,7 @@ inventé pour un test qui se trouve aussi dans ton coffre), change le nom dans l
 | `mas optimiser` | optimise les agents avec GEPA | `--regenerer` |
 | `mas evaluer` | score du programme courant | |
 | `mas check-repo` | cherche tes données et tes fichiers personnels dans ce que git publierait | `--staged` |
+| `mas structure ENTRÉE` | décrit la mise en page des relevés que mas ne lit pas directement (intitulés de colonnes génériques, positions, types date / montant / texte), sans aucune donnée : de quoi apprendre une nouvelle banque à mas | `--tous` |
 
 `ENTRÉE` est un PDF, un ZIP de PDF ou un dossier. Toutes les commandes qui lisent la
 configuration acceptent `-c chemin/config.yaml`.
@@ -446,7 +473,9 @@ src/mas/
   config.py             lecture de config.yaml en objets typés
   modeles.py            structures de données, définitions des catégories envoyées à l'IA
   ingestion.py          PDF/ZIP -> texte page par page, tableaux | col | col |
-  releve.py             lecture du tableau ligne par ligne, comptes, soldes et totaux
+  releve.py             lecture d'après l'en-tête Date / Débit / Crédit, comptes, soldes et totaux
+  lecteur_deduit.py     lecture sans en-tête : colonnes déduites, hypothèses vérifiées au centime
+  structure.py          mas structure : squelette d'un relevé, sans aucune donnée
   anonymisation/
     reconnaisseurs.py   regex FR + GLiNER
     validateurs.py      Luhn, IBAN mod 97, clé RIB, clé NIR
@@ -466,26 +495,46 @@ src/mas/
   export.py             mise en page simple d'un rapport Markdown (anciens rapports)
   suivi.py              durées, tokens et coût estimé d'une analyse
   cli.py                commandes mas ..., chargement du .env
-tests/                  faux LLM, relevé BRED factice, lecture, budget, catégories,
+tests/                  faux LLM, relevés factices (BRED, Boursorama, une famille de mise en page
+                        chacun), lecture, budget, catégories,
                         anonymisation, pipeline, page, export, journal, suivi
 docs/categories.md      ce que l'IA range dans chaque catégorie
 .githooks/pre-commit    lance mas check-repo avant chaque commit
+.github/ISSUE_TEMPLATE/ ticket « Banque non reconnue » (sortie de mas structure)
 config.example.yaml     modèle de config.yaml ; .env.example : modèle de .env (copiés par mas init)
 ```
 
-## Adapter à ta banque
+## Ta banque n'est pas reconnue ?
 
-Les relevés réels varient d'une banque à l'autre. Lance `mas anonymiser` sur un vrai relevé et
-relis le résultat :
+Tu le vois avant l'envoi : dans le tableau « Tes relevés », la colonne Lecture indique « par l'IA : mise en
+page non reconnue (raison) ». L'analyse fonctionne quand même, mais l'IA lit ces pages : c'est payant, et
+aucune vérification au centime n'est possible. Pour que ta banque soit lue directement, pour toi et pour
+les suivants :
 
-- **le tableau est-il relu ligne par ligne ?** Chaque opération doit apparaître sur sa propre
-  ligne `| date | libellé | débit | crédit |`. C'est le cas dès que le tableau a un en-tête
-  « Date … Débit … Crédit » ; sinon, l'extraction passe par l'IA ;
-- **les données personnelles sont-elles masquées, et seulement elles ?** Ajoute au besoin des mots
-  à `liste_blanche` (marchands masqués à tort) ou à `identite.autres` (données oubliées).
+1. **Décris la mise en page, sans aucune donnée :**
+   ```bash
+   mas structure releves/
+   ```
+   Seuls apparaissent des intitulés de colonnes pris dans une liste fixe de mots génériques (date, libellé,
+   débit…), des positions et des types (`DATE_LONGUE`, `MONTANT`, `TEXTE`) : jamais tes libellés, tes montants,
+   ton nom ou tes numéros. La sortie reste dans ton terminal ; relis-la avant de la partager.
+2. **Ouvre un ticket « Banque non reconnue »** sur GitHub (modèle prévu) avec le nom de la banque, cette
+   sortie et la raison affichée.
+3. **La mise en page est reproduite** dans un relevé factice (`tests/releves_factices.py`), le lecteur est
+   adapté, et ta banque est lue directement pour tout le monde.
 
-Pour aller plus loin, ajoute le format de ta banque au générateur synthétique et relance
-`mas optimiser`.
+| Raison affichée | Ce qu'elle veut dire | À essayer |
+|---|---|---|
+| aucun solde ni total imprimé pour vérifier la lecture | mas ne lit pas directement ce qu'il ne peut pas vérifier | le relevé mensuel officiel de ta banque (avec soldes), plutôt qu'un export d'historique |
+| relevé scanné (image) | pas de texte positionné dans le PDF | le PDF téléchargé depuis ton espace bancaire, pas un scan |
+| contrôle faux en lisant … | aucune lecture des colonnes ne retombe sur les soldes | souvent plusieurs comptes dans le même relevé : signale-le (étape 2) |
+| N colonnes de montants | une mise en page encore inconnue | signale-la (étape 2) |
+| aucune ligne qui commence par une date et finit par un montant | la date ou le montant sont ailleurs sur la ligne | signale-la (étape 2) |
+| dates sans année, et date du relevé introuvable | les opérations n'ont que « 05.09 », sans période lisible | signale-la (étape 2) |
+
+**Vérifie aussi l'anonymisation** sur un vrai relevé avec `mas anonymiser` : tes données doivent être
+masquées, et seulement elles (marchands masqués à tort : `anonymisation.liste_blanche` ; données oubliées :
+`identite.autres`).
 
 ## Limites
 
