@@ -90,3 +90,44 @@ def test_analyse_dans_le_compteur_de_tokens(config, jeu_anonymise, monkeypatch):
         resultat = orchestrateur.analyser(docs)
     assert resultat.analyse.transactions and not resultat.analyse.alertes_extraction
     assert faux.appels > 0 and orchestrateur.lm is faux
+
+
+def test_cle_libelle_sans_references_ni_dates_collees():
+    # Un loyer dont chaque virement porte un identifiant différent reste une seule dépense
+    assert cle_libelle("Virement instantané émis a1b2c3d residence [PERSONNE_3] loyer [PERSONNE_1]") \
+        == cle_libelle("Virement instantané émis 1234567 residence [PERSONNE_3] loyer [PERSONNE_1]")
+    # Boursorama colle la date au commerçant ; la BP écrit « Carte <n°> <commerçant> le <date> »
+    assert cle_libelle("CARTE02/05/26WWW.STREAMING.COM CB*1234") == cle_libelle("Carte 1234567 www.streaming.com le 02/01/26 / ref cb.xxxxx5678")
+    assert cle_libelle("CARTE30/08/26BOULANGERIE319 2CB*1234") == "BOULANGERIE"
+
+
+def test_depense_annuelle_et_categories_imposees():
+    from mas.agents.programme import appliquer_categories
+    from mas.recurrence import reperer_annuels
+
+    courses = [TransactionCategorisee(date=f"2026-{m:02d}-05", libelle="CB LIDL", montant=-40.0, categorie="alimentation")
+               for m in range(1, 9)]
+    axa = [TransactionCategorisee(date="2026-05-29", libelle="PRLV SEPA ASSURANCE AUTO EXEMPLE", montant=-1200.00, categorie="assurance"),
+           TransactionCategorisee(date="2026-07-30", libelle="VIR SEPA ASSURANCE AUTO EXEMPLE REMBOURSEMENT", montant=200.0, categorie="assurance")]
+    groupes = reperer_annuels(courses + axa, [])
+    assert [(g.periodicite, g.montant_moyen, g.montant_mensuel) for g in groupes] == [("annuelle", 1000.0, 83.33)]
+    assert reperer_annuels(courses[:3] + axa, []) == []          # moins de six mois : on ne peut pas savoir
+
+    ops = [TransactionCategorisee(date="2026-06-01", libelle="Carte 1000005 [PERSONNE_7] le 26/05/26", montant=-450.0, categorie="shopping"),
+           TransactionCategorisee(date="2026-03-05", libelle="Carte 1000006 autoservice le 04/03/26", montant=-500.0, categorie="shopping")]
+    en_clair = lambda l: l.replace("[PERSONNE_7]", "garage martin")
+    imposees = appliquer_categories(ops, {"Garage Martin": "transport", "AUTOSERVICE": "transport"}, en_clair)
+    assert [t.categorie for t in imposees] == ["transport", "transport"]
+    assert [t.libelle for t in imposees] == [t.libelle for t in ops]      # les vrais noms ne sont pas écrits
+
+
+def test_loyer_paye_a_date_variable():
+    dates = ["2026-01-01", "2026-01-29", "2026-02-25", "2026-03-27", "2026-05-05", "2026-06-15", "2026-07-04",
+             "2026-08-01", "2026-08-31", "2026-09-28"]
+    loyers = [TransactionCategorisee(date=d, libelle=f"VIR INST EMIS {i}A{i}F9C RESIDENCE [PERSONNE_3] LOYER",
+                                     montant=-650.0 - i, categorie="logement") for i, d in enumerate(dates)]
+    courses = [TransactionCategorisee(date=f"2026-{m:02d}-{j:02d}", libelle="CB LIDL", montant=-35.0 - j, categorie="alimentation")
+               for m in range(1, 10) for j in (2, 11, 15, 27)]           # jours irréguliers
+    groupes = {g.cle: g for g in detecter_recurrences(loyers + courses)}
+    assert groupes["RESIDENCE PERSONNE_3 LOYER"].periodicite == "mensuelle"
+    assert "LIDL" not in groupes                                     # des courses, plusieurs fois par mois : pas un loyer

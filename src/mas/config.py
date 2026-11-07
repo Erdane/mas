@@ -8,6 +8,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from .modeles import Categorie
+
 
 class ConfigLLM(BaseModel):
     modele: str = "mistral/mistral-small-latest"
@@ -59,7 +61,7 @@ class ConfigAnonymisation(BaseModel):
         default_factory=lambda: [
             "PERSON", "EMAIL_ADDRESS", "IBAN_CODE", "CREDIT_CARD",
             "FR_TELEPHONE", "FR_RIB", "FR_NIR", "FR_NUM_COMPTE", "FR_ADRESSE",
-            "FR_CIVILITE_NOM", "FR_REFERENCE_MANDAT",
+            "FR_CIVILITE_NOM", "FR_REFERENCE_MANDAT", "FR_LIEU",
         ]
     )
     liste_blanche: list[str] = Field(default_factory=list)
@@ -114,6 +116,16 @@ class ConfigAnalyse(BaseModel):
     # même personne, d'un montant stable d'au moins loyer_montant_min € → comptés dans Logement
     loyers_sans_libelle: Literal["detecter", "non"] = "detecter"
     loyer_montant_min: float = 300.0
+    # Achat exceptionnel (voiture, travaux…) : les paiements à un même bénéficiaire en 7 jours qui font
+    # au moins achat_exceptionnel_min €, et un prêt débloqué, sont montrés à part de la moyenne
+    # mensuelle ; les mensualités du prêt, elles, comptent chaque mois. 0 = coupé.
+    achat_exceptionnel_min: float = 3000.0
+    # Argent reçu de proches en plus de ce que tu leur as envoyé : « a_part » (montré, pas compté
+    # comme un revenu) ou « revenu » (une aide régulière, par exemple)
+    recus_de_proches: Literal["a_part", "revenu"] = "a_part"
+    # Ce que tu sais d'un commerçant : un mot de son libellé -> sa catégorie, à la place de celle de
+    # l'IA (ex. « COLIN TEAM TOY: transport » pour un garage). Voir la section « À vérifier » du rapport.
+    categories: dict[str, Categorie] = Field(default_factory=dict)
 
 
 class Config(BaseModel):

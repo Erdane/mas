@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import cache
 from typing import Callable
 
 from presidio_analyzer import EntityRecognizer, RecognizerResult
@@ -89,6 +90,141 @@ class RegexGroupeRecognizer(EntityRecognizer):
         return resultats
 
 
+# Mots d'un libellé de virement qui ne désignent pas une personne : mots outils, motifs, organismes et
+# banques fréquents. Juste après la référence d'un virement, tout le reste est pris pour un nom.
+MOTS_DE_VIREMENT = {
+    "de", "du", "des", "la", "le", "les", "et", "a", "au", "aux", "en", "pour", "par", "sur", "etc", "sa", "sas",
+    "loyer", "residence", "résidence", "remboursement", "rembourse", "remb", "reglement", "règlement",
+    "quittance", "facture", "cotisation", "salaire", "appointement", "paie", "prime", "pension", "allocation",
+    "aide", "cadeau", "merci", "resto", "restaurant", "courses", "avance", "part", "partie", "participation",
+    "cagnotte", "anniversaire", "noel", "noël", "vacances", "voyage", "billet", "avion", "essence", "peage",
+    "péage", "parking", "offre", "contrat", "dossier", "sinistre", "virement", "ech", "echeance", "échéance",
+    "abonnement", "assurance", "mutuelle", "sante", "santé", "impot", "impots", "impôt", "impôts",
+    "edf", "electricite", "électricité", "france", "engie", "caf", "cpam", "ameli", "urssaf", "dgfip", "ddfip",
+    "tresor", "trésor", "public", "finances", "publiques", "pole", "emploi", "travail", "sncf", "ratp", "axa",
+    "iard", "maif", "macif", "matmut", "allianz", "groupama", "generali", "mgen", "camieg", "sanergi", "ieg",
+    "iegsante", "lydia", "paypal", "revolut", "boursobank", "boursorama", "nickel", "corner", "thecorner",
+    "asos", "zalando", "amazon", "take", "off", "speedy", "bridgestone", "solutions", "transfert",
+}
+# Prénoms qui sont aussi des mots, des lieux ou des enseignes courantes sur un relevé
+PRENOMS_EXCLUS = {
+    "france", "orange", "paris", "bas", "val", "les", "park", "claude", "jules", "angus", "noel", "art", "violet",
+    "berry", "man", "per", "fleur", "cuba", "toy", "siv", "stella", "uma", "london", "desi", "ville", "vic",
+    "leroy", "franc", "dee", "king", "colin", "rose", "max", "mai", "juin", "avril", "star", "bio", "nova",
+    "elle", "son", "trace", "page", "case", "sera", "vide", "media", "math", "add", "true", "eda",
+}
+
+
+@cache
+def prenoms() -> frozenset[str]:
+    """Prénoms de toutes les langues de Faker (près de 17 000), en minuscules, sans les mots courants."""
+    import importlib
+    import pkgutil
+
+    import faker.providers.person as personnes
+
+    trouves: set[str] = set()
+    for module in pkgutil.iter_modules(personnes.__path__):
+        try:
+            fournisseur = importlib.import_module(f"faker.providers.person.{module.name}").Provider
+        except Exception:
+            continue
+        for attribut in ("first_names", "first_names_male", "first_names_female"):
+            valeurs = getattr(fournisseur, attribut, ())
+            valeurs = valeurs.keys() if isinstance(valeurs, dict) else valeurs
+            if isinstance(valeurs, (list, tuple, set, type({}.keys()))):
+                trouves.update(v.lower() for v in valeurs if isinstance(v, str) and v.isascii() and len(v) >= 3)
+    exclus = PRENOMS_EXCLUS | MOTS_DE_VIREMENT | {m.lower() for m in MOTS_NON_NOMS}
+    return frozenset(trouves - exclus)
+
+
+_JETON = re.compile(r"\[[A-Z]+_\d+\]")
+_BIC = re.compile(r"[a-z]{4}(?:fr|be|de|lu|es|it|nl|gb|ch|mc|ie|pt)[a-z0-9]{2}(?:[a-z0-9]{3})?", re.IGNORECASE)
+
+
+class ContrepartieRecognizer(EntityRecognizer):
+    """Noms de personnes et lieux que les règles en majuscules ne voient pas : libellés en minuscules
+    (BRED, Banque Populaire) ou compactés sans espaces (Boursorama).
+
+    - nom collé : « VIRSEPAVincentDupont », « VIRINSTM.DUPONTJEAN » ;
+    - contrepartie d'un virement : les mots qui suivent sa référence (« Virement instantané émis
+      1a2b3c4 jean dupont … »), sauf les mots de MOTS_DE_VIREMENT, jusqu'à un pseudonyme, un code BIC
+      ou un mot avec des chiffres (trois mots au plus) ;
+    - civilité : « m jean-pierre », « mlle martin julie », « dr ing dupont » ;
+    - commerçant qui porte un prénom : « Carte 1234567 sophie martin le 19/01/26 » ;
+    - lieu d'un retrait d'espèces : « RETRAITDAB24/05/26LYON », « DAB 1234567 bp quai exemple / ».
+    """
+
+    COLLE = re.compile(r"\bVIR(?:SEPA|INST)?+(?:MR|MME|MLLE|M\.)?+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'.\-]{3,})")
+    REFERENCE = re.compile(r"\b(?:émis|emis|reçu|recu|automatique|permanent)\s+(?=[0-9a-z]*\d)[0-9a-z]{5,}\s+"
+                           r"(?:(?:m|mr|mme|mlle)\.?\s+)?", re.IGNORECASE)
+    CIVILITE = re.compile(r"\b(?:m|mr|mme|mlle|dr|docteur|monsieur|madame)\.?\s+([a-zà-ÿ][a-zà-ÿ'\-]+"
+                          r"(?:\s+[a-zà-ÿ][a-zà-ÿ'\-]+)?)", re.IGNORECASE)
+    COMMERCANT = re.compile(r"\bcarte \d{7} ([^|/\n]+?) le \d{2}/\d{2}/\d{2}", re.IGNORECASE)
+    RETRAIT = re.compile(r"RETRAITDAB\d{2}/\d{2}/\d{2}(\d{0,3}[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' \-]*?)(?=\s?CB\*|$)"
+                         r"|\bDAB \d+ ([^|/\n]+?)\s*/", re.MULTILINE)
+
+    def __init__(self, liste_blanche: list[str] | None = None):
+        self.gardes = MOTS_DE_VIREMENT | {m.lower() for m in [*MOTS_NON_NOMS, *(liste_blanche or [])]}
+        super().__init__(supported_entities=["PERSON", "FR_LIEU"], supported_language=LANGUE, name="contrepartie")
+
+    def load(self) -> None:
+        pass
+
+    def _garde(self, mot: str) -> bool:
+        return mot.lower().strip(".,'-") in self.gardes
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        resultats = []
+
+        def ajouter(entite: str, debut: int, fin: int, score: float = 0.9) -> None:
+            if fin > debut:
+                resultats.append(RecognizerResult(entite, debut, fin, score))
+
+        for m in self.COLLE.finditer(text):
+            blob = m.group(1)
+            if not any(g in blob.lower() for g in ("pret", "deblocage", "virement", "corner", "rembours")):
+                ajouter("PERSON", *m.span(1))
+        for ligne in re.finditer(r"[^\n]+", text):
+            l, decalage = ligne.group(0), ligne.start()
+            if re.search(r"(?i)\bvir", l):
+                for m in self.REFERENCE.finditer(l):
+                    debut = fin = None
+                    for i, mot in enumerate(re.finditer(r"[^\s|]+", l[m.end():])):
+                        t = mot.group(0)
+                        if i >= 3 or _JETON.fullmatch(t) or re.search(r"\d", t) or _BIC.fullmatch(t) or t == "/":
+                            break
+                        if self._garde(t):
+                            if debut is not None:
+                                ajouter("PERSON", decalage + m.end() + debut, decalage + m.end() + fin)
+                                debut = None
+                            continue
+                        debut = mot.start() if debut is None else debut
+                        fin = mot.end()
+                    if debut is not None:
+                        ajouter("PERSON", decalage + m.end() + debut, decalage + m.end() + fin)
+            for m in self.CIVILITE.finditer(l):
+                nom = []                            # les mots du nom, jusqu'au premier mot gardé
+                for mot in re.finditer(r"\S+", m.group(1)):
+                    if self._garde(mot.group(0)):
+                        break
+                    nom.append(mot)
+                if nom:
+                    ajouter("PERSON", decalage + m.start(1) + nom[0].start(), decalage + m.start(1) + nom[-1].end())
+            if re.search(r"(?i)\bvir", l):        # un prénom connu, n'importe où dans un virement
+                for mot in re.finditer(r"[a-zà-ÿ][a-zà-ÿ'\-]+", l, re.IGNORECASE):
+                    if mot.group(0).lower() in prenoms() and not self._garde(mot.group(0)):
+                        ajouter("PERSON", decalage + mot.start(), decalage + mot.end(), 0.8)
+            for m in self.COMMERCANT.finditer(l):
+                mots = re.findall(r"[a-zà-ÿ]+", m.group(1).lower())
+                if len(mots) <= 3 and any(mot in prenoms() for mot in mots):
+                    ajouter("PERSON", decalage + m.start(1), decalage + m.end(1))
+        for m in self.RETRAIT.finditer(text):
+            groupe = 1 if m.group(1) else 2
+            ajouter("FR_LIEU", *m.span(groupe))
+        return resultats
+
+
 def _mots_exclus(liste_blanche: list[str]) -> str:
     mots = sorted({re.escape(m.upper()) for m in liste_blanche if m.strip()}, key=len, reverse=True)
     return r"(?!(?:" + "|".join(mots) + r")\b)" if mots else ""
@@ -172,6 +308,8 @@ def construire_reconnaisseurs(liste_blanche: list[str]) -> list[EntityRecognizer
             score=0.75,
             nom="contrepartie_virement",
         ),
+        # Libellés en minuscules ou compactés : contreparties, civilités, commerçants, lieux de retrait
+        ContrepartieRecognizer(liste_blanche),
         # Référence unique de mandat (RUM) : identifiant personnel du prélèvement
         RegexGroupeRecognizer(
             "FR_REFERENCE_MANDAT",

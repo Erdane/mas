@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .anonymisation.moteur import motif_souple
+from .anonymisation.moteur import motif_colle, motif_souple, mots_du_nom
 from .anonymisation.validateurs import iban_valide, luhn_valide, nir_valide
 from .config import ConfigVerification
 
@@ -54,9 +54,13 @@ class Verificateur:
             (v, "DONNEE_PERSO") for v in valeurs_coffre if len(v.strip()) >= 4
         ]
         for valeur, entite in candidats:
-            m = re.search(motif_souple(valeur), texte, flags=re.IGNORECASE)
-            if m:
-                fuites.add(Fuite(entite, m.group(0), "valeur connue"))
+            colle = motif_colle(valeur) if entite == "PERSON" else None     # nom collé : « VIRINSTJEANDUPONT »
+            seuls = [motif_souple(m) for m in mots_du_nom(valeur)] if entite == "PERSON" else []
+            for motif in filter(None, (motif_souple(valeur), colle, *seuls)):
+                m = re.search(motif, texte, flags=re.IGNORECASE)
+                if m:
+                    fuites.add(Fuite(entite, m.group(0), "valeur connue"))
+                    break
 
         if self.config.llm_local.actif:
             fuites.update(self._verifier_llm(texte))

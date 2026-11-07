@@ -24,6 +24,7 @@ import re
 import time
 from collections import Counter
 from datetime import date
+from typing import Callable
 
 import dspy
 from dspy.utils.exceptions import LMError
@@ -34,9 +35,10 @@ log = logging.getLogger("mas")
 # Avancement étape par étape : affiché par `mas analyser`, muet pendant l'optimisation GEPA
 progression = logging.getLogger("mas.progression")
 
+from ..anonymisation.coffre import sans_accents
 from ..config import ConfigLLM, ConfigRecurrence
 from ..modeles import Classement, GroupeRecurrent, Transaction, TransactionCategorisee
-from ..recurrence import detecter_recurrences, reperer_loyers
+from ..recurrence import detecter_recurrences, reperer_annuels, reperer_loyers
 from .signatures import CategoriserLibelles, ClasserRecurrences, ExtraireTransactions
 
 MONTANT = re.compile(r"(?<![\d,.])-?\d{1,3}(?:[  .]\d{3})*,\d{2}(?![\d])")
@@ -116,6 +118,22 @@ def controler_extraction(page: str, transactions: list[Transaction]) -> str:
     return " ".join(problemes)
 
 
+def appliquer_categories(transactions: list[TransactionCategorisee], categories: dict[str, str],
+                         en_clair: Callable[[str], str] | None = None) -> list[TransactionCategorisee]:
+    """Ce que tu sais d'un commerçant (analyse.categories : un mot de son libellé -> sa catégorie)
+    l'emporte sur l'IA. `en_clair` (le coffre, en local) remet les vrais noms : un commerçant masqué
+    se désigne par son vrai nom, qui ne quitte jamais ton ordinateur."""
+    if not categories:
+        return transactions
+    motifs = [(sans_accents(m).upper(), c) for m, c in categories.items() if m.strip()]
+
+    def categorie(t: TransactionCategorisee) -> str:
+        libelle = sans_accents(t.libelle if en_clair is None else f"{t.libelle} {en_clair(t.libelle)}").upper()
+        return next((c for m, c in motifs if m in libelle), t.categorie)
+
+    return [t.model_copy(update={"categorie": categorie(t)}) for t in transactions]
+
+
 class AnalyseReleve(dspy.Module):
     def __init__(
         self,
@@ -123,6 +141,7 @@ class AnalyseReleve(dspy.Module):
         tentatives_max: int = 2,
         taille_lot: int = 40,
         loyer_montant_min: float | None = None,
+        categories: dict[str, str] | None = None,
     ):
         super().__init__()
         self.extracteur = dspy.ChainOfThought(ExtraireTransactions)
@@ -132,6 +151,7 @@ class AnalyseReleve(dspy.Module):
         self.tentatives_max = tentatives_max
         self.taille_lot = taille_lot
         self.loyer_montant_min = loyer_montant_min  # None : pas de détection des loyers sans libellé
+        self.categories = categories or {}          # analyse.categories : ce que tu sais d'un commerçant
 
     # --- agent 1 : extraction avec boucle de correction ----------------------
     def extraire(self, pages: list[str]) -> tuple[list[Transaction], list[str]]:
@@ -227,10 +247,11 @@ class AnalyseReleve(dspy.Module):
         transactions, alertes = self.extraire(pages)
         return self.analyser_transactions(transactions, alertes)
 
-    def analyser_transactions(self, transactions: list[Transaction], alertes=()) -> dspy.Prediction:
+    def analyser_transactions(self, transactions: list[Transaction], alertes=(),
+                              en_clair: Callable[[str], str] | None = None) -> dspy.Prediction:
         """Étapes 2 à 4 sur des opérations déjà extraites (par l'IA ou lues dans le tableau)."""
         alertes = list(alertes)
-        categorisees = self.categoriser(transactions)
+        categorisees = appliquer_categories(self.categoriser(transactions), self.categories, en_clair)
         loyers: list[dict] = []
         if self.loyer_montant_min is not None:
             categorisees, loyers = reperer_loyers(categorisees, self.loyer_montant_min)
@@ -239,6 +260,7 @@ class AnalyseReleve(dspy.Module):
                                  l["montant_mensuel"], l["beneficiaire"])
         # agent 3 : déterministe
         groupes = detecter_recurrences(categorisees, self.config_recurrence)
+        groupes += reperer_annuels(categorisees, groupes)
         progression.info("[3/5] Dépenses récurrentes (calcul local, sans IA) : %d trouvée(s)", len(groupes))
         if groupes:
             progression.info("[4/5] Classement obligatoire / optionnel de %d dépense(s)…", len(groupes))

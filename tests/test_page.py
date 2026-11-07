@@ -8,7 +8,7 @@ from mas.cli import app
 from mas.modeles import Classement, GroupeRecurrent
 from mas.page import construire_page, donnees_rapport, ecrire_pages
 
-VALEURS = {"PERSONNE_1": "Aline VERDIER", "REF_1": "RUM-0042"}
+VALEURS = {"PERSONNE_1": "Claire DUBOIS", "REF_1": "RUM-0042"}
 
 
 def _groupe(cle, libelle, categorie, mensuel):
@@ -47,14 +47,14 @@ def _donnees(**kw):
 def test_donnees_serialisables_et_sans_vraies_valeurs():
     d = _donnees()
     texte = json.dumps(d, ensure_ascii=False)
-    assert "[PERSONNE_1]" in texte and "Aline" not in texte
+    assert "[PERSONNE_1]" in texte and "Claire" not in texte
     assert d["periode"] == {"debut": "2026-01", "fin": "2026-04", "nb_mois": 4}
     assert {r["nature"] for r in d["recurrents"]} == {"obligatoire", "abonnement_optionnel"}
 
 
 def test_version_anonyme_affiche_des_masques():
     page = construire_page(_donnees())
-    assert 'class="masque"' in page and "Personne 1" in page and "Aline" not in page
+    assert 'class="masque"' in page and "Personne 1" in page and "Claire" not in page
     assert "Version anonyme" in page
     assert "il te reste" in page and "582 €" in page            # 3 091,84 − 2 509,49
     assert "De janvier à avril 2026, 4 mois de relevés" in page
@@ -68,7 +68,7 @@ def test_version_anonyme_affiche_des_masques():
 
 def test_version_personnelle_signale_les_valeurs_remises_en_local():
     page = construire_page(_donnees(), VALEURS)
-    assert '<mark class="demasque"' in page and "Aline VERDIER" in page
+    assert '<mark class="demasque"' in page and "Claire DUBOIS" in page
     assert 'class="masque"' not in page and "Version personnelle" in page
 
 
@@ -83,9 +83,9 @@ def test_ecrire_pages_puis_exporter_depuis_le_json(tmp_path, monkeypatch):
     md = tmp_path / "rapport.md"
     md.write_text("# Analyse budgétaire\n", encoding="utf-8")
     perso, anonyme, chemin_json = ecrire_pages(md, _donnees(), VALEURS)
-    assert "Aline VERDIER" in perso.read_text(encoding="utf-8")
-    assert "Aline" not in anonyme.read_text(encoding="utf-8")
-    assert "Aline" not in chemin_json.read_text(encoding="utf-8")
+    assert "Claire DUBOIS" in perso.read_text(encoding="utf-8")
+    assert "Claire" not in anonyme.read_text(encoding="utf-8")
+    assert "Claire" not in chemin_json.read_text(encoding="utf-8")
 
     # `mas exporter` régénère les deux pages à partir du JSON (coffre éphémère : pas de vraies valeurs)
     monkeypatch.chdir(tmp_path)
@@ -132,6 +132,133 @@ def test_notes_loyer_probable_et_remboursements():
     budget["proches"] = {"envoye": 100.0, "recu": 110.0, "rembourse": 80.0, "depense": 20.0, "revenu": 30.0}
     donnees = donnees_rapport(budget, CLASSEMENTS, SYNTHESE)
     anonyme = construire_page(donnees)
-    assert "c'est sans doute un loyer" in anonyme and "Personne 1" in anonyme and "Aline" not in anonyme
+    assert "c'est sans doute un loyer" in anonyme and "Personne 1" in anonyme and "Claire" not in anonyme
     assert "dont 80\u00a0€ de remboursements" in anonyme
-    assert "Aline VERDIER" in construire_page(donnees, VALEURS)
+    assert "Claire DUBOIS" in construire_page(donnees, VALEURS)
+
+
+def test_virements_avec_des_proches_par_personne():
+    budget = _budget()
+    budget["proches"] = {"envoye": 2300.0, "recu": 0.0, "rembourse": 0.0, "depense": 2300.0, "revenu": 0.0}
+    budget["proches_detail"] = [{
+        "personne": "PERSONNE_1", "virements": 2, "envoye": 9200.0, "recu": 0.0, "depense": 9200.0, "revenu": 0.0,
+        "nature": "ponctuel", "plus_gros": {"date": "2026-03-20", "montant": 9000.0},
+        "operations": [{"date": "2026-02-02", "libelle": "VIR INST A [PERSONNE_1]", "montant": -200.0},
+                       {"date": "2026-03-20", "libelle": "VIR SEPA EMIS VERS [PERSONNE_1] <b>", "montant": -9000.0}],
+    }, {
+        "personne": "boursorama", "virements": 1, "envoye": 0.0, "recu": 50.0, "depense": 0.0, "revenu": 50.0,
+        "nature": "recus", "plus_gros": None,
+        "operations": [{"date": "2026-01-05", "libelle": "VIR RECU BOURSORAMA", "montant": 50.0}],
+    }]
+    donnees = donnees_rapport(budget, CLASSEMENTS, SYNTHESE)
+    assert "Claire" not in json.dumps(donnees, ensure_ascii=False)
+    anonyme = construire_page(donnees)
+    assert "Virements avec des proches, personne par personne" in anonyme and "Personne 1" in anonyme
+    assert "Claire" not in anonyme and "&lt;b&gt;" in anonyme and "<b>" not in anonyme
+    assert "9\u202f000,00\u00a0€" in anonyme and "le 20 mars 2026" in anonyme and "2\u202f300\u00a0€ par mois" in anonyme
+    assert "boursorama" in anonyme and "comptes_personnels" in anonyme
+    assert anonyme.index('class="proches"') < anonyme.index('class="recurrents"')
+    assert "Claire DUBOIS" in construire_page(donnees, VALEURS)
+    assert 'class="proches"' not in construire_page(_donnees())             # ancien rapport.json
+
+
+def test_depense_annuelle_comptee_une_fois_par_an():
+    budget = _budget()
+    assurance = GroupeRecurrent(cle="axa", libelle="PRLV SEPA AXA FRANCE IARD", categorie="assurance",
+                                periodicite="annuelle", occurrences=1, montant_moyen=987.40,
+                                montant_mensuel=82.28, montant_variable=False, dates=[])
+    budget["par_nature"]["obligatoire"].append(assurance)
+    donnees = donnees_rapport(budget, CLASSEMENTS, SYNTHESE)
+    ligne = construire_page(donnees).split("PRLV SEPA AXA FRANCE IARD")[1].split("</tr>")[0]
+    assert "une fois par an, payé 1 fois" in ligne and "ramené au mois" in ligne
+    assert "82,28" in ligne and "987" in ligne
+    from mas.page import _par_an
+    axa = next(r for r in donnees["recurrents"] if r["libelle"].startswith("PRLV SEPA AXA"))
+    assert _par_an(axa) == 987.40                                              # pas 12 × 82,28 = 987,36
+
+
+def test_section_a_verifier():
+    budget = _budget()
+    budget["a_verifier"] = [{"date": "2026-04-14", "libelle": "Carte 1000001 [PERSONNE_1] le 13/04/26", "montant": -250.0,
+                             "categorie": "autre", "raison": "Commerçant inconnu : donne sa catégorie dans analyse.categories."}]
+    donnees = donnees_rapport(budget, CLASSEMENTS, SYNTHESE)
+    anonyme = construire_page(donnees)
+    assert "À vérifier" in anonyme and "14 avril 2026" in anonyme and "Commerçant inconnu" in anonyme
+    assert "Claire" not in anonyme and "Claire DUBOIS" in construire_page(donnees, VALEURS)
+    assert 'class="a-verifier"' not in construire_page(_donnees())          # rien à vérifier : pas de section
+
+
+def _par_mois_avec_revenus(budget):
+    budget["par_mois"] = {
+        "mois": ["2025-12", "2026-01", "2026-02", "2026-03"], "partiels": ["2025-12"],
+        "revenus": [500.0, 3000.0, 2500.0, 3500.0],
+        "lignes": [{"categorie": "logement", "montants": [100.0, 1037.29, 1037.29, 1037.29]},
+                   {"categorie": "alimentation", "montants": [0.0, 962.71, 2462.71, 1462.71]}],
+        "totaux": [100.0, 2000.0, 3500.0, 2500.0],
+    }
+    return budget
+
+
+def test_ecart_revenus_depenses_avec_la_moyenne():
+    page = construire_page(donnees_rapport(_par_mois_avec_revenus(_budget()), CLASSEMENTS, SYNTHESE))
+    section = page.split('<section class="ecart"', 1)[1].split("</section>", 1)[0]
+    assert section.count("<svg") == 2                               # bureau et téléphone
+    # écarts +1 000, −1 000, +1 000 ; décembre, incomplet, est laissé de côté
+    assert "moyenne +333\xa0€" in section and "Moyenne sur 3 mois" in section
+    assert section.count('class="depassement"') == 2 and "décembre" not in section
+    assert "Les mois incomplets sont laissés de côté" in section
+    assert page.index('class="ecart"') < page.index('class="par-mois"')
+
+
+def test_pas_d_ecart_sans_revenus_mois_par_mois():
+    budget = _par_mois_avec_revenus(_budget())
+    budget["par_mois"].pop("revenus")
+    assert 'class="ecart"' not in construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE))
+
+
+OPERATIONS = [
+    {"date": "2026-01-20", "libelle": "VIR SEPA [PERSONNE_1] REMBOURSEMENT", "montant": 12.0, "categorie": "alimentation"},
+    {"date": "2026-01-03", "libelle": "CB CARREFOUR 02/01 CB*1234", "montant": -52.3, "categorie": "alimentation"},
+    {"date": "2026-02-05", "libelle": "PRLV SEPA LOYER [PERSONNE_1] FR42ZZZ457385 SEPA AB12 RCUR 9", "montant": -1037.29,
+     "categorie": "logement"},
+    {"date": "2026-02-27", "libelle": "VIR SALAIRE", "montant": 3091.84, "categorie": "revenu"},
+]
+
+
+def test_page_de_detail_par_categorie_puis_par_mois(tmp_path):
+    d = donnees_rapport(_par_mois_avec_revenus(_budget()), CLASSEMENTS, SYNTHESE, operations=OPERATIONS)
+    md = tmp_path / "rapport.md"
+    md.write_text("# Analyse budgétaire\n", encoding="utf-8")
+    perso, anonyme, chemin_json = ecrire_pages(md, d, VALEURS)
+    detail_anonyme = (tmp_path / "rapport_anonyme_detail.html").read_text(encoding="utf-8")
+    detail_perso = (tmp_path / "rapport_detail.html").read_text(encoding="utf-8")
+
+    # le rapport mène au détail : la catégorie, et chaque case du tableau mois par mois
+    page = anonyme.read_text(encoding="utf-8")
+    assert 'class="vers-detail" href="rapport_anonyme_detail.html#cat-logement"' in page
+    assert 'href="rapport_anonyme_detail.html#cat-logement-2026-02"' in page
+    assert "Touche une catégorie" in page
+    assert 'href="rapport_detail.html#cat-alimentation"' in perso.read_text(encoding="utf-8")
+
+    # le détail : une section par catégorie, un bloc par mois, le plus récent en haut
+    assert 'id="cat-alimentation-2026-01"' in detail_anonyme and 'id="cat-logement-2026-02"' in detail_anonyme
+    assert detail_anonyme.index('id="cat-logement"') < detail_anonyme.index('id="cat-alimentation"')
+    assert "40,30\xa0€" in detail_anonyme                            # 52,30 dépensés, 12 remboursés
+    assert "+12,00\xa0€" in detail_anonyme and "remboursement</span>" in detail_anonyme
+    assert "CB*1234" not in detail_anonyme and "FR42ZZZ" not in detail_anonyme   # références techniques retirées
+    assert "VIR SALAIRE" not in detail_anonyme                       # un revenu n'est pas une dépense
+    assert 'href="rapport_anonyme.html#t-cat"' in detail_anonyme
+    assert 'class="masque"' in detail_anonyme and "Claire" not in detail_anonyme
+    assert "Claire DUBOIS" in detail_perso and "Version personnelle" in detail_perso
+
+    donnees = json.loads(chemin_json.read_text(encoding="utf-8"))
+    assert [o["date"] for o in donnees["operations"]][:2] == ["2026-01-03", "2026-01-20"]
+    assert "Claire" not in chemin_json.read_text(encoding="utf-8")
+
+
+def test_sans_operations_ni_page_de_detail_ni_liens(tmp_path):
+    md = tmp_path / "rapport.md"
+    md.write_text("# Analyse budgétaire\n", encoding="utf-8")
+    _, anonyme, _ = ecrire_pages(md, _donnees(), VALEURS)
+    assert not (tmp_path / "rapport_detail.html").exists()
+    assert 'class="vers-detail"' not in anonyme.read_text(encoding="utf-8")

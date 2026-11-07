@@ -44,8 +44,8 @@ def ecrire_releve_bred(chemin: Path) -> Path:
         ("09.04", "Carte 1234567 monoprix le 08/04/26", "45,10", "", "09.04.26"),
         ("10.04", "Virement 9900089", "300,00", "", "10.04.26"),
         ("12.04", "Virement SEPA émis 9027718 12.04.26 JEAN DUPONT", "500,00", "", "12.04.26"),
-        ("", "BOUSFRPPXXX", "", "", ""),                                   # suite du libellé
-        ("15.04", "Prélèvement SEPA 2931880 edf clients particuliers", "81,30", "", "15.04.26"),
+        ("", "EXMPFRPPXXX", "", "", ""),                                   # suite du libellé
+        ("15.04", "Prélèvement SEPA 1234568 edf clients particuliers", "81,30", "", "15.04.26"),
         ("28.04", "Virement reçu salaire acme", "", "2.400,00", "28.04.26"),
         ("30.04", "Virement 9900099", "", "150,00", "30.04.26"),
         ("", "Total des mouvements", "926,40", "2.550,00", ""),
@@ -53,7 +53,7 @@ def ecrire_releve_bred(chemin: Path) -> Path:
         ("", "Total des frais de gestion débités du 01.04 au 30.04.2026", "12,62", "", ""),
     ]
     for date, libelle, debit, credit, valeur in lignes:
-        y -= LIGNE if date or libelle != "BOUSFRPPXXX" else 10
+        y -= LIGNE if date or libelle != "EXMPFRPPXXX" else 10
         _ligne(c, y, date, libelle, debit, credit, valeur)
     y -= 2 * LIGNE
     _entete_tableau(c, y)

@@ -14,14 +14,16 @@ llm:
 
 # --- Ce qui compte comme dépense ---
 # L'argent qui change seulement de compte n'est pas une dépense : il est montré à part.
-# Les virements vers / depuis tes livrets sont repérés tout seuls quand ces livrets figurent sur le
-# même relevé (même montant, sens inverse, à 4 jours près).
+# Repérés tout seuls (même montant, sens inverse, à 4 jours près) : les virements vers / depuis tes
+# livrets quand ils figurent sur un des relevés, et entre deux comptes courants dont tu donnes les
+# relevés (deux banques, mêmes dates).
 analyse:
   # Virements vers un bénéficiaire qui porte ton nom (identite.noms) : c'est une déduction, pas une
   # certitude (homonyme, proche, compte joint…). transfert = mis à part ; depense = compté en dépense.
   virements_a_ton_nom: transfert
-  # Tes comptes dans d'autres banques : IBAN, code BIC (ex. BOUSFRPP pour Boursorama), nom de la
-  # banque… Les virements qui les mentionnent sont mis à part, sans déduction sur le nom.
+  # Tes comptes dans d'autres banques : IBAN, code BIC (ex. CEPAFRPP pour la Caisse d'Épargne), nom de la
+  # banque, ton nom tel qu'il apparaît (« J DUPONT »)… Les virements qui les mentionnent sont mis à
+  # part, sans déduction sur le nom.
   comptes_personnels: []
   # Virements à des proches : depense (par défaut) ou a_part (montrés à part, hors dépenses).
   # Avec depense, un remboursement annule le virement qu'il rembourse (personne par personne).
@@ -30,6 +32,17 @@ analyse:
   # tous les mois, montant stable d'au moins loyer_montant_min €) et compté dans Logement. non = coupé.
   loyers_sans_libelle: detecter
   loyer_montant_min: 300
+  # Achat exceptionnel (voiture, travaux…) : les paiements à un même bénéficiaire en 7 jours qui font
+  # au moins achat_exceptionnel_min €, et un prêt débloqué, sont montrés à part de la moyenne mensuelle
+  # (ils figurent dans « À vérifier ») ; les mensualités du prêt, elles, comptent. 0 = coupé.
+  achat_exceptionnel_min: 3000
+  # Argent reçu de proches en plus de ce que tu leur as envoyé : a_part (montré, pas compté comme un
+  # revenu) ou revenu (une aide régulière, par exemple).
+  recus_de_proches: a_part
+  # Ce que tu sais d'un commerçant (voir « À vérifier » dans le rapport) : un mot de son libellé, ou son
+  # vrai nom tel que tu le vois dans ta version personnelle -> sa catégorie. Remplace celle de l'IA.
+  categories: {}
+  #   GARAGE MARTIN: transport
 
 # --- Tes propres données : elles ne doivent JAMAIS sortir. ---
 # Elles sont recherchées en plus de la détection automatique, puis contrôlées
@@ -62,6 +75,7 @@ anonymisation:
     - FR_ADRESSE
     - FR_CIVILITE_NOM
     - FR_REFERENCE_MANDAT
+    - FR_LIEU            # lieu d'un retrait d'espèces (ville, agence)
   # Mots que spaCy prend parfois pour des personnes mais qui sont des marchands.
   liste_blanche: [LECLERC, AUCHAN, CARREFOUR, MONOPRIX, FRANPRIX, PICARD, DARTY,
                   BOULANGER, DECATHLON, FNAC, NETFLIX, SPOTIFY, DEEZER, DISNEY,

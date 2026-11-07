@@ -37,9 +37,39 @@ def motif_souple(terme: str) -> str:
             if not morceaux or morceaux[-1] != r"[\s\-]+":
                 morceaux.append(r"[\s\-]+")
             continue
-        base = next((b for b, v in VARIANTES.items() if c.lower() in v), None)
-        morceaux.append(f"[{VARIANTES[base]}]" if base else re.escape(c))
+        morceaux.append(_lettre(c))
     return r"(?<!\w)" + "".join(morceaux) + r"(?!\w)"
+
+
+def _lettre(c: str) -> str:
+    base = next((b for b, v in VARIANTES.items() if c.lower() in v), None)
+    return f"[{VARIANTES[base]}]" if base else re.escape(c)
+
+
+def mots_du_nom(nom: str) -> list[str]:
+    """Mots d'un nom déclaré assez longs pour être cherchés seuls (« VIR AUTOMATIQUE DUPONT ») sans
+    attraper un prénom court dans un nom de commerce."""
+    mots = re.findall(r"\w+", nom)
+    return [m for m in mots if len(m) >= 5] if len(mots) >= 2 else []
+
+
+def motif_colle(nom: str) -> str | None:
+    """Nom collé aux mots voisins, sans espaces : « VIRINSTJEANDUPONT » (libellé compacté par la
+    banque). Seulement pour un nom d'au moins deux mots et huit lettres : un prénom court seul se
+    retrouverait au milieu de mots ordinaires."""
+    mots = re.findall(r"\w+", nom)
+    if len(mots) < 2 or sum(len(m) for m in mots) < 8:
+        return None
+    return r"[\s\-]*".join("".join(_lettre(c) for c in mot) for mot in mots)
+
+
+def _hors_de(debut: int, fin: int, retenues: list) -> list[tuple[int, int]]:
+    """Les morceaux de [debut, fin) qu'aucune détection retenue ne couvre."""
+    morceaux = [(debut, fin)]
+    for r in retenues:
+        morceaux = [m for a, b in morceaux
+                    for m in ((a, min(b, r.debut)), (max(a, r.fin), b)) if m[0] < m[1]]
+    return morceaux
 
 
 @dataclass
@@ -146,15 +176,35 @@ class Anonymiseur:
 
         # Données personnelles déclarées + fuites signalées par le vérificateur : priorité max
         for valeur, entite in [*self.termes_personnels, *termes_supplementaires]:
-            for m in re.finditer(motif_souple(valeur), texte, flags=re.IGNORECASE):
-                detections.append(Detection(entite, m.start(), m.end(), 1.01, "identite"))
+            colle = motif_colle(valeur) if entite == "PERSON" else None     # nom collé : « VIRINSTJEANDUPONT »
+            for motif in filter(None, (motif_souple(valeur), colle)):
+                for m in re.finditer(motif, texte, flags=re.IGNORECASE):
+                    detections.append(Detection(entite, m.start(), m.end(), 1.01, "identite"))
+            # Un mot du nom, seul : en dernier recours, là où rien d'autre n'a été repéré (spaCy
+            # trouve « DUPONT JEAN » en entier, un e-mail reste un e-mail)
+            for mot in mots_du_nom(valeur) if entite == "PERSON" else []:
+                for m in re.finditer(motif_souple(mot), texte, flags=re.IGNORECASE):
+                    detections.append(Detection(entite, m.start(), m.end(), 0.01, "identite"))
 
-        # Résolution des chevauchements : meilleur score, puis plus longue détection
+        # Résolution des chevauchements : meilleur score, puis plus longue détection. Une détection
+        # qui en chevauche une mieux notée garde ce qui dépasse : « jean martin » suivi de ton nom
+        # (repéré à part) reste masqué
         detections.sort(key=lambda d: (-d.score, -(d.fin - d.debut)))
         retenues: list[Detection] = []
         for d in detections:
-            if all(d.fin <= r.debut or d.debut >= r.fin for r in retenues):
-                retenues.append(d)
+            entiere = all(d.fin <= r.debut or d.debut >= r.fin for r in retenues)
+            for debut, fin in [(d.debut, d.fin)] if entiere else _hors_de(d.debut, d.fin, retenues):
+                # Ce qui dépasse ne franchit ni une colonne du tableau ni une ligne, et contient un mot
+                for m in ([None] if entiere else re.finditer(r"[^|\n]+", texte[debut:fin])):
+                    if m is None:
+                        retenues.append(d)
+                        continue
+                    morceau = m.group(0)
+                    if sum(c.isalpha() for c in morceau) < 2:
+                        continue
+                    a = debut + m.start() + len(morceau) - len(morceau.lstrip(" ,.-'"))
+                    b = debut + m.end() - (len(morceau) - len(morceau.rstrip(" ,.-'")))
+                    retenues.append(Detection(d.entite, a, b, d.score, d.source))
         return sorted(retenues, key=lambda d: d.debut)
 
     def anonymiser(self, texte: str, termes_supplementaires=()) -> ResultatAnonymisation:

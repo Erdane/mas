@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -94,6 +95,69 @@ def _resume_analyse(conso, duree_anonymisation: float, duree_analyse: float, rep
     console.print("[dim]Coût estimé d'après les tarifs publics du fournisseur ; sa console fait foi.[/dim]")
 
 
+def _resume_sans_ia(duree_anonymisation: float, duree_analyse: float) -> None:
+    from .suivi import duree_lisible
+
+    table = Table(title="Résumé du traitement", show_header=False, title_justify="left")
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Anonymisation (sur ton PC)", duree_lisible(duree_anonymisation))
+    table.add_row("Analyse sans IA (sur ton PC)", duree_lisible(duree_analyse))
+    table.add_row("Appels à l'IA", "aucun")
+    console.print(table)
+
+
+def chemin_rapport(dossier: Path = Path("rapports"), sans_ia: bool = False, quand: datetime | None = None) -> Path:
+    """rapports/rapport_2026-11-01_1430.md : un rapport par analyse, jamais écrasé (les secondes
+    départagent deux analyses lancées dans la même minute)."""
+    quand = quand or datetime.now()
+    suffixe = "_no-ai" if sans_ia else ""
+    chemin = dossier / f"rapport_{quand:%Y-%m-%d_%H%M}{suffixe}.md"
+    return dossier / f"rapport_{quand:%Y-%m-%d_%H%M%S}{suffixe}.md" if chemin.exists() else chemin
+
+
+def ouvrir_dans_le_navigateur(page: Path) -> None:
+    """Ouvre la page dans le navigateur par défaut, côté Windows sous WSL. Un échec ne gêne pas :
+    le chemin du rapport est déjà affiché."""
+    import shutil
+    import subprocess
+    import webbrowser
+
+    try:
+        if shutil.which("wslpath") and shutil.which("explorer.exe"):
+            chemin = subprocess.run(["wslpath", "-w", str(page.resolve())], capture_output=True, text=True,
+                                    check=True).stdout.strip()
+            subprocess.run(["explorer.exe", chemin], capture_output=True)  # répond 1 même quand tout va bien
+        else:
+            webbrowser.open(page.resolve().as_uri())
+    except (OSError, subprocess.SubprocessError) as e:
+        console.print(f"[yellow]Ouverture automatique impossible ({e}) : ouvre {page} à la main.[/yellow]")
+
+
+def _ecrire_rapport(sortie: Path, resultat, traitement: dict, orchestrateur) -> Path:
+    """Écrit les versions personnelle et anonyme (Markdown, HTML), affiche le rapport. Renvoie la page HTML."""
+    from .page import donnees_rapport, ecrire_pages
+
+    sortie_anonyme = sortie.with_name(sortie.stem + "_anonyme.md")
+    sortie.parent.mkdir(parents=True, exist_ok=True)
+    sortie.write_text(resultat.rapport, encoding="utf-8")
+    sortie_anonyme.write_text(resultat.rapport_anonyme, encoding="utf-8")
+    alertes = list(resultat.analyse.alertes_extraction)
+    donnees = donnees_rapport(resultat.budget, resultat.analyse.classements, resultat.commentaire,
+                              alertes, traitement, lectures=resultat.lectures,
+                              operations=resultat.analyse.transactions)
+    html, html_anonyme, _ = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
+    for message in donnees["controles"]:
+        console.print(f"[yellow]⚠ {message}[/yellow]")
+    if len(alertes) > len(donnees["controles"]):
+        console.print(f"[yellow]{len(alertes) - len(donnees['controles'])} page(s) avec des "
+                      "incohérences d'extraction non résolues : vérifie le rapport.[/yellow]")
+    console.print(Markdown(resultat.rapport))
+    console.print(f"\nRapport écrit dans [bold]{sortie}[/bold] et [bold]{html}[/bold] "
+                  f"(version anonyme : {sortie_anonyme}, {html_anonyme})\n")
+    return html
+
+
 def _config_personnelle(chemin: Path | None):
     """Sans config.yaml, mas ne connaît ni ton identité ni ton modèle : on s'arrête plutôt que de
     traiter tes relevés avec des réglages par défaut."""
@@ -113,13 +177,13 @@ def _modele_exemple(nom: str) -> Path | None:
     return None
 
 
-def _resume(docs) -> None:
+def _resume(docs, sans_ia: bool = False) -> None:
     """Pour chaque relevé : comment il est lu (directement, ou par l'IA et pourquoi) et le contrôle au centime."""
     from rich.text import Text
 
     from .orchestrateur import Orchestrateur
 
-    lectures = Orchestrateur.lectures(docs)
+    lectures = Orchestrateur.lectures(docs, sans_ia)
     table = Table(title="Tes relevés")
     table.add_column("Document")
     table.add_column("Pages", justify="right")
@@ -132,9 +196,11 @@ def _resume(docs) -> None:
                       str(d.nb_remplacements))
     console.print(table)
     if any(not l["directe"] for l in lectures):
-        console.print("[yellow]Mise en page non reconnue : ces relevés seront lus par l'IA (payant, et non "
-                      "vérifiable au centime).[/yellow] Pour qu'ils soient lus directement la prochaine fois : "
-                      "[bold]mas structure[/bold], puis « Ta banque n'est pas reconnue ? » dans le README.")
+        constat = ("ces relevés sont écartés : sans l'IA, ils ne comptent pas dans le rapport." if sans_ia else
+                   "ces relevés seront lus par l'IA (payant, et non vérifiable au centime).")
+        console.print(f"[yellow]Mise en page non reconnue : {constat}[/yellow] Pour qu'ils soient lus directement "
+                      "la prochaine fois : [bold]mas structure[/bold], puis « Ta banque n'est pas reconnue ? » "
+                      "dans le README.")
 
 
 @app.command()
@@ -238,15 +304,21 @@ def anonymiser(
 @app.command()
 def analyser(
     entree: Path = typer.Argument(..., help="PDF, ZIP de PDF ou dossier"),
-    sortie: Path = typer.Option(Path("rapports/rapport.md"), help="Rapport final (avec les vrais noms)"),
+    sortie: Path | None = typer.Option(None, help="Rapport final, avec les vrais noms (par défaut : "
+                                                  "rapports/rapport_<date>_<heure>.md, jamais écrasé)"),
     oui: bool = typer.Option(False, "--oui", "-y", help="Ne pas demander confirmation avant l'envoi"),
+    sans_ia: bool = typer.Option(False, "--no-ai", help="Tout calculer sur ton PC : rien n'est envoyé, "
+                                                        "catégories par mots-clés"),
+    ouvrir: bool = typer.Option(True, "--open/--no-open", help="Ouvrir le rapport HTML à la fin"),
     config: Path = OptionConfig,
 ):
-    """Anonymise, vérifie, puis fait analyser par les agents LLM."""
+    """Anonymise, vérifie, puis fait analyser par les agents LLM (ou sans IA, avec --no-ai)."""
     cfg = _config_personnelle(config)
     from .orchestrateur import FuiteBloquante, Orchestrateur
 
     _logs(True, progression=True)
+    if sans_ia:
+        cfg.verification.llm_local.actif = False
     orchestrateur = Orchestrateur(cfg)
     debut = time.perf_counter()
     try:
@@ -255,7 +327,24 @@ def analyser(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     duree_anonymisation = time.perf_counter() - debut
-    _resume(docs)
+    _resume(docs, sans_ia)
+    sortie = sortie or chemin_rapport(sans_ia=sans_ia)
+
+    if sans_ia:
+        if not any(d.operations is not None for d in docs):
+            console.print("[red]Aucun relevé lu directement : sans l'IA, il n'y a rien à analyser.[/red]")
+            raise typer.Exit(1)
+        console.print("\n[bold]Analyse sans IA[/bold] : rien ne quitte ton ordinateur.")
+        debut = time.perf_counter()
+        resultat = orchestrateur.analyser_sans_ia(docs)
+        duree_analyse = time.perf_counter() - debut
+        traitement = {"sans_ia": True, "duree_anonymisation": round(duree_anonymisation, 1),
+                      "duree_analyse": round(duree_analyse, 1)}
+        html = _ecrire_rapport(sortie, resultat, traitement, orchestrateur)
+        _resume_sans_ia(duree_anonymisation, duree_analyse)
+        if ouvrir:
+            ouvrir_dans_le_navigateur(html)
+        return
 
     # Ce qui part réellement : des relevés lus directement, seulement les libellés et les montants des
     # opérations (catégorisation, synthèse) ; des autres, les pages entières, que l'IA devra lire.
@@ -279,7 +368,6 @@ def analyser(
     import dspy
     from dspy.utils.exceptions import LMError
 
-    from .page import donnees_rapport, ecrire_pages
     from .suivi import consommation, journaliser
 
     console.print(f"\n[bold]Analyse en cours[/bold] ({cfg.llm.modele}) : chaque étape s'affiche ci-dessous.")
@@ -299,10 +387,6 @@ def analyser(
     appels_factures = sum(c.appels for c in conso)
     # L'historique du LM garde aussi les réponses servies par le cache : la différence les compte
     reponses_cache = max(0, len(getattr(orchestrateur.lm, "history", [])) - appels_factures)
-    sortie_anonyme = sortie.with_name(sortie.stem + "_anonyme.md")
-    sortie.parent.mkdir(parents=True, exist_ok=True)
-    sortie.write_text(resultat.rapport, encoding="utf-8")
-    sortie_anonyme.write_text(resultat.rapport_anonyme, encoding="utf-8")
     couts = [c.cout_usd for c in conso]
     traitement = {
         "modele": cfg.llm.modele,
@@ -314,19 +398,10 @@ def analyser(
         "tokens_sortie": sum(c.tokens_sortie for c in conso),
         "cout_usd": None if None in couts else sum(couts),     # None : tarif inconnu d'un modèle
     }
-    alertes = list(resultat.analyse.alertes_extraction)
-    donnees = donnees_rapport(resultat.budget, resultat.analyse.classements, resultat.commentaire,
-                              alertes, traitement, lectures=resultat.lectures)
-    html, html_anonyme, _ = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
-    for message in donnees["controles"]:
-        console.print(f"[yellow]⚠ {message}[/yellow]")
-    if len(alertes) > len(donnees["controles"]):
-        console.print(f"[yellow]{len(alertes) - len(donnees['controles'])} page(s) avec des "
-                      "incohérences d'extraction non résolues : vérifie le rapport.[/yellow]")
-    console.print(Markdown(resultat.rapport))
-    console.print(f"\nRapport écrit dans [bold]{sortie}[/bold] et [bold]{html}[/bold] "
-                  f"(version anonyme : {sortie_anonyme}, {html_anonyme})\n")
+    html = _ecrire_rapport(sortie, resultat, traitement, orchestrateur)
     _resume_analyse(conso, duree_anonymisation, duree_analyse, reponses_cache)
+    if ouvrir:
+        ouvrir_dans_le_navigateur(html)
 
 
 @app.command()

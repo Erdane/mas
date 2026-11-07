@@ -37,7 +37,7 @@ construire un budget.
  └────────────────────────────────────────────────────────────────────────┘
     │
     ▼
- Rapport dé-pseudonymisé EN LOCAL (rapports/rapport.md + .html) + version anonyme
+ Rapport dé-pseudonymisé EN LOCAL (rapports/rapport_<date>.md + .html) + version anonyme
 ```
 
 ## Sommaire
@@ -96,7 +96,7 @@ prioritaire. Il est ignoré par git, comme `config.yaml`.
 | Section | Rôle |
 |---|---|
 | `llm` | modèle d'analyse, au format LiteLLM `fournisseur/modele`. `anthropic/claude-haiku-4-5-20251001` est économique (1 $ / 5 $ par million de tokens en entrée / sortie) ; `anthropic/claude-sonnet-5-5` est plus fin et coûte le double (2 $ / 10 $) ; `anthropic/claude-opus-5-5` est le plus fin des trois et coûte quatre fois Haiku (4 $ / 20 $). Pour Sonnet et Opus 5.5 : **`temperature: null` et `max_tokens: 16000`**, car ils refusent la température et leur réflexion avant de répondre compte dans `max_tokens` |
-| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`), loyers payés sans le mot « loyer » (`loyers_sans_libelle`, `loyer_montant_min`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
+| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`), loyers payés sans le mot « loyer » (`loyers_sans_libelle`, `loyer_montant_min`), achats exceptionnels (`achat_exceptionnel_min`), argent reçu de proches (`recus_de_proches`), catégories que tu imposes (`categories`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
 | `identite` | tes données qui ne doivent jamais sortir : noms (toutes les variantes écrites sur tes relevés), adresses, IBAN, numéros de compte, téléphones, e-mails, et `autres` (n° client, n° de contrat, proches à qui tu fais des virements…) |
 | `anonymisation` | modèle spaCy, types d'entités masquées, `liste_blanche` des marchands à ne pas masquer |
 | `verification` | nombre maximal de boucles anonymisation → vérification (voir [Les deux boucles de mas](#les-deux-boucles-de-mas)), vérificateur LLM local optionnel (Ollama) |
@@ -187,14 +187,31 @@ sont comptés : si tu relances la même analyse, les réponses déjà calculées
 de DSPy, gratuitement. Si l'IA est injoignable (clé invalide, crédit épuisé, modèle inconnu),
 l'analyse s'arrête tout de suite avec l'erreur au lieu de produire un rapport vide.
 
+**Sans IA : `mas analyser releves/ --no-ai`**
+
+Rien n'est envoyé, rien n'est facturé, aucune confirmation n'est demandée. La lecture des relevés,
+les récurrences et tous les chiffres viennent du même code. Ce qui change :
+
+- les catégories viennent de mots-clés ([`sans_ia.py`](src/mas/sans_ia.py)). Un commerçant inconnu
+  reste dans « Autres », et une épargne non reconnue compte comme une dépense. Le rapport dit quelle
+  part des dépenses reste à classer et liste les commerçants qui pèsent le plus :
+  `analyse.categories` permet de les classer ;
+- le classement obligatoire / optionnel suit la catégorie ;
+- le commentaire se limite à des constats calculés, sans conseils ;
+- un relevé dont la mise en page n'est pas reconnue est écarté et signalé : seule l'IA sait le lire.
+
 **7. Lire le résultat**
 
 | Fichier | Contenu |
 |---|---|
-| `rapports/rapport.html` | **la page du rapport**, avec tes vrais noms remis en local |
-| `rapports/rapport_anonyme.html` | la même page, telle que l'IA l'a vue (pseudonymes) |
-| `rapports/rapport.md` / `rapport_anonyme.md` | les mêmes informations en texte |
-| `rapports/rapport.json` | les données de la page, avec les pseudonymes (pour `mas exporter`) |
+| `rapports/rapport_2026-11-01_1430.html` | **la page du rapport**, avec tes vrais noms remis en local ; elle s'ouvre à la fin de l'analyse (`--no-open` pour l'éviter) |
+| `rapports/rapport_2026-11-01_1430_anonyme.html` | la même page, telle que l'IA l'a vue (pseudonymes) |
+| `rapports/rapport_2026-11-01_1430_detail.html` / `…_anonyme_detail.html` | le détail de tes dépenses : chaque catégorie, puis chaque mois, avec toutes ses opérations |
+| `rapports/rapport_2026-11-01_1430.md` / `…_anonyme.md` | les mêmes informations en texte |
+| `rapports/rapport_2026-11-01_1430.json` | les données de la page, avec les pseudonymes (pour `mas exporter`) |
+
+Chaque analyse écrit ses fichiers sous un nouveau nom, à sa date et à son heure : les précédentes restent
+dans `rapports/`, que git ignore. Une analyse sans IA ajoute `_no-ai` au nom.
 
 La page du rapport montre :
 
@@ -202,10 +219,16 @@ La page du rapport montre :
   (obligatoires, abonnements optionnels, courantes), la partie vide est ce qu'il te reste, avec ce
   montant en grand ;
 - **ce que dit l'analyse :** le constat et les pistes d'économies rédigés par l'IA ;
-- **où va ton argent :** tes dépenses mensuelles par catégorie, avec le tableau des montants exacts ;
+- **où va ton argent :** tes dépenses mensuelles par catégorie, avec le tableau des montants exacts.
+  Touche une catégorie : la page de détail s'ouvre sur elle, tous ses mois dépliés, chaque opération
+  avec sa date et son montant ;
+- **revenus et dépenses, mois par mois :** ce qu'il reste de tes revenus une fois tes dépenses payées,
+  une barre par mois (sous zéro, tu as dépensé plus que tes revenus), et la moyenne en pointillé. Les
+  mois incomplets sont laissés de côté ;
 - **mois par mois :** chaque catégorie de dépenses, mois après mois, avec la moyenne et le total de
-  chaque mois ; plus la case est colorée, plus la dépense est élevée. Un mois que tes relevés ne
-  couvrent qu'en partie est marqué « incomplet » : ses montants sont forcément plus bas ;
+  chaque mois ; plus la case est colorée, plus la dépense est élevée. Touche une case pour voir les
+  opérations de ce mois-là. Un mois que tes relevés ne couvrent qu'en partie est marqué « incomplet » :
+  ses montants sont forcément plus bas ;
 - **tes dépenses récurrentes :** à payer quoi qu'il arrive, abonnements que tu peux arrêter,
   dépenses courantes qui reviennent, avec le coût par mois et par an.
 
@@ -214,11 +237,11 @@ Dans la version anonyme, les pseudonymes apparaissent comme de petits masques ; 
 personnelle, les vraies valeurs remises en local sont soulignées en pointillé.
 
 La page est autonome : styles et script intégrés, aucune ressource externe (l'ouvrir n'envoie
-rien), thème clair ou sombre selon Windows, imprimable. Pour l'ouvrir depuis WSL dans le
-navigateur Windows :
+rien), thème clair ou sombre selon Windows, imprimable. Elle s'ouvre toute seule à la fin de
+l'analyse ; pour la rouvrir depuis WSL dans le navigateur Windows :
 
 ```bash
-explorer.exe "$(wslpath -w rapports/rapport.html)"
+explorer.exe "$(wslpath -w rapports/rapport_2026-11-01_1430.html)"
 ```
 
 `mas coffre` affiche la table des pseudonymes et de leurs vraies valeurs, en local.
@@ -275,23 +298,37 @@ barre des revenus (« Pas compté dans tes dépenses ») et dans le rapport text
 
 | Mouvement | Comment il est repéré | Réglage |
 |---|---|---|
-| vers / depuis tes livrets | un virement du compte courant et un mouvement d'un livret du même relevé, de même montant, en sens inverse, à 4 jours près | automatique |
-| vers tes autres comptes | le libellé mentionne un compte que tu as déclaré (IBAN, code BIC, banque) | `analyse.comptes_personnels` |
+| vers / depuis tes livrets | un virement du compte courant et un mouvement d'un livret figurant sur un des relevés, de même montant, en sens inverse, à 4 jours près | automatique |
+| entre tes comptes de deux banques | un virement débité sur un relevé et le même montant crédité sur un autre, à 5 jours près (week-end, jour férié) ; les deux relevés couvrent ensemble l'une de ces dates (pas deux mois successifs d'un même compte), et les deux libellés ne nomment pas deux personnes différentes. Ton nom, même écrit autrement d'une banque à l'autre, compte pour toi, et les paires où les deux libellés portent ton nom passent en premier | automatique, si tu donnes les relevés des deux comptes |
+| vers tes autres comptes | le libellé mentionne un compte que tu as déclaré (IBAN, code BIC, banque, ou ton nom tel qu'il apparaît : « J DUPONT ») | `analyse.comptes_personnels` |
 | vers un compte à ton nom | le bénéficiaire porte le nom déclaré dans `identite.noms` | `analyse.virements_a_ton_nom` |
 | avec des proches | catégorie « virements à des proches » | `analyse.virements_a_des_proches` |
+| achat exceptionnel et son prêt | des paiements à un même bénéficiaire en 7 jours qui font au moins 3 000 € (prélèvements exceptés), et un prêt débloqué ; les mensualités du prêt, elles, comptent chaque mois | `analyse.achat_exceptionnel_min` |
 
 Le repérage « à ton nom » est une **déduction**, pas une certitude : un homonyme, un proche qui
 porte ton nom ou un compte joint donnent le même résultat. Ces virements sont mis à part par
 défaut ; mets `virements_a_ton_nom: depense` pour les compter comme des dépenses, ou déclare tes
 vrais comptes dans `comptes_personnels` pour ne plus dépendre du nom. Les virements à des proches
-comptent comme des dépenses, sauf avec `virements_a_des_proches: a_part`.
+comptent comme des dépenses, sauf avec `virements_a_des_proches: a_part`. Le rapport les détaille
+personne par personne (envoyé, reçu, compté en dépense, plus gros virement, chaque opération) : si
+l'un d'eux va en fait vers un compte à toi, ajoute ce qui le désigne dans `comptes_personnels`.
 
 Le reste du calcul :
 
 - **remboursements :** un remboursement par carte vient en déduction des dépenses de sa catégorie ;
-- **revenus :** salaire et revenus, plus l'argent reçu de particuliers, une fois les remboursements
-  déduits (un remboursement annule le virement qu'il rembourse, voir
-  [docs/categories.md](docs/categories.md#virements-à-des-proches)) ;
+- **revenus :** salaire et revenus. L'argent reçu de particuliers annule d'abord ce que tu leur
+  avais envoyé (voir [docs/categories.md](docs/categories.md#virements-à-des-proches)) ; ce qui
+  dépasse est montré à part, pas compté comme un revenu, sauf avec `analyse.recus_de_proches: revenu` ;
+- **loyer :** un virement avec « loyer » dans le libellé reste un loyer, même si ton nom y figure
+  en référence ;
+- **dépenses récurrentes :** les références, numéros de magasin et dates collées sont retirés des
+  libellés avant de les regrouper ; un même montant payé presque tous les mois compte comme mensuel
+  même si la date varie, et une assurance, un abonnement ou une taxe payés une seule fois sur au
+  moins six mois de relevés comptent comme une dépense annuelle, ramenée au mois ;
+- **à vérifier :** le rapport liste ce que mas n'a pas pu classer avec certitude (achats
+  exceptionnels, prêt, commerçants inconnus ou au nom masqué de 100 € ou plus, virements de 500 € ou
+  plus à des particuliers). Ce que tu sais d'un commerçant se note dans `analyse.categories`
+  (« GARAGE MARTIN: transport ») : son vrai nom marche aussi, il est comparé en local ;
 - **loyer sans libellé :** des virements mensuels d'un montant stable vers une même personne
   (300 € ou plus) sont comptés dans le logement et signalés comme « loyer probable »
   (`analyse.loyers_sans_libelle`, `analyse.loyer_montant_min`) ;
@@ -334,6 +371,17 @@ recommencer (3 corrections au maximum) ──── encore des fuites ──→ 
   libellé de virement en page 4. Le vérificateur le retrouve, mas ré-anonymise cette page, puis
   revérifie **tous** les documents : une valeur découverte dans le troisième fichier doit aussi
   être masquée si elle apparaît dans le premier.
+- **Ton nom sous toutes ses formes :** les noms de `identite.noms` sont cherchés dans les deux
+  ordres, **collés** aux mots voisins quand la banque compacte le libellé (« VIRINSTJEANDUPONT »,
+  pour un nom d'au moins deux mots et huit lettres), et **mot par mot** quand un seul apparaît
+  (« Virement automatique DUPONT », pour les mots de cinq lettres ou plus, en mot entier).
+- **Les autres personnes, même en minuscules ou collées :** dans un virement, les mots qui suivent la
+  référence (« émis 1a2b3c4 jean dupont ») sont pris pour le nom de l'autre partie, sauf les
+  organismes et motifs connus (EDF, CAF, loyer, remboursement…) ; un nom collé par Boursorama
+  (« VIRSEPAJeanDupont »), une civilité (« m », « mlle », « dr ») et un prénom connu (près de
+  17 000, toutes langues) sont masqués aussi, comme un commerçant qui porte un prénom. Le lieu d'un
+  retrait d'espèces (ville, agence) devient un `[LIEU_n]`. Les villes dans les noms de commerçants
+  (« PRIMARK LYON ») restent visibles.
 - **En pratique :** la boucle s'arrête dès qu'une vérification ne trouve plus rien, en général
   juste après le premier passage. Sur le relevé de démonstration, il n'y a eu aucune itération
   supplémentaire.
@@ -406,7 +454,7 @@ inventé pour un test qui se trouve aussi dans ton coffre), change le nom dans l
 |---|---|---|
 | `mas init` | prépare le dossier : `config.yaml`, `.env`, `releves/`, `rapports/`, modèle spaCy (n'écrase rien) | `-c` |
 | `mas anonymiser ENTRÉE` | anonymise seulement, rien n'est envoyé | `--sortie DOSSIER` |
-| `mas analyser ENTRÉE` | anonymise, vérifie, analyse, écrit les rapports dans `rapports/` | `--sortie rapports/rapport.md`, `--oui` |
+| `mas analyser ENTRÉE` | anonymise, vérifie, analyse, écrit un rapport daté dans `rapports/` et l'ouvre | `--no-ai`, `--no-open`, `--sortie FICHIER.md`, `--oui` |
 | `mas exporter RAPPORT.md` | régénère les pages HTML d'un rapport existant, sans rappeler l'IA (à partir de `rapport.json` ; sans lui, simple mise en page du Markdown) | `-c` |
 | `mas coffre` | table pseudonymes → vraies valeurs (local) | |
 | `mas generer` | relevés synthétiques (PDF + vérité JSON) | `--n`, `--sortie`, `--graine` |
@@ -464,7 +512,8 @@ répartition mois par mois,
 l'anonymisation (dates et noms de livrets non masqués), la vérification du dépôt avant publication,
 `mas init`, la page HTML (versions anonyme et personnelle, déficit,
 injection de HTML), la lecture du `.env`, l'affichage unique des messages répétés, l'avancement de
-l'analyse et le calcul des tokens et du coût.
+l'analyse, le calcul des tokens et du coût, et l'analyse sans IA (aucun appel au modèle, rapport daté,
+ouverture du navigateur).
 
 ## Structure
 
@@ -491,9 +540,11 @@ src/mas/
   synthetique.py        générateur de relevés + vérité terrain
   optimisation/         jeux de données, métrique avec feedback, boucle GEPA
   orchestrateur.py      enchaîne tout, bloque l'envoi en cas de fuite
-  page.py               page HTML du rapport (barre des revenus, catégories, mois par mois, récurrences)
+  page.py               page HTML du rapport (barre des revenus, catégories, écart revenus/dépenses, mois par
+                        mois, récurrences) et sa page de détail par catégorie et par mois
   export.py             mise en page simple d'un rapport Markdown (anciens rapports)
   suivi.py              durées, tokens et coût estimé d'une analyse
+  sans_ia.py            mas analyser --no-ai : catégories par mots-clés, constats calculés
   cli.py                commandes mas ..., chargement du .env
 tests/                  faux LLM, relevés factices (BRED, Boursorama, une famille de mise en page
                         chacun), lecture, budget, catégories,
@@ -540,7 +591,7 @@ masquées, et seulement elles (marchands masqués à tort : `anonymisation.liste
 
 - **Anonymisation imparfaite :** l'anonymisation automatique n'est jamais parfaite. Relis la
   sortie de `mas anonymiser` sur tes premiers relevés.
-- **Ville des achats visible :** dans « CB CARREFOUR VILLEJUIF », la ville reste lisible. C'est un
+- **Ville des achats visible :** dans « CB CARREFOUR LYON », la ville reste lisible. C'est un
   choix pour garder les marchands lisibles. Ajoute ta ville dans `identite.autres` si tu veux la
   masquer.
 - **PDF scannés :** sans l'option OCR, une page scannée sort **vide, sans message d'erreur**. Si

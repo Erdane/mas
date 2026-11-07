@@ -32,8 +32,12 @@ def cle_libelle(libelle: str, nb_mots: int = 3) -> str:
     t = sans_accents(libelle).upper()
     t = re.sub(r"\[(?!PERSONNE_)[A-Z]+_\d+\]", " ", t)        # jetons non-personne
     t = re.sub(r"\[(PERSONNE_\d+)\]", r" \1 ", t)               # garde le bénéficiaire
+    t = re.sub(r"^(CARTE|AVOIR|RETRAITDAB)\s?\d{2}/\d{2}/\d{2}", r"\1 ", t)   # « CARTE02/05/26NETFLIX » (Boursorama)
+    t = re.sub(r"\s?\d?CB\*\d+", " ", t)                       # « 2CB*1234 » : la carte, pas le commerçant
     t = re.sub(r"\b\d{1,2}[/.\-]\d{1,2}(?:[/.\-]\d{2,4})?\b", " ", t)  # dates
-    t = re.sub(r"\b\w*\d{3,}\w*\b", " ", t)                    # références numériques
+    t = re.sub(r"\b(?=[0-9A-F]*\d[0-9A-F]*\d)[0-9A-F]{6,}\b", " ", t)  # identifiants (« E81AEFC »)
+    t = re.sub(r"\b([A-Z]{3,})\d+\b", r"\1", t)                # numéro de magasin : « LIDL3604 »
+    t = re.sub(r"\b\w*\d{3,}\w*\b|\bX{3,}\b", " ", t)          # références numériques, n° de carte masqué
     t = re.sub(r"[^A-Z0-9_ ]", " ", t)
     t = BRUIT.sub(" ", t)
     mots = [m for m in t.split() if len(m) > 1 or m.isdigit()]
@@ -80,12 +84,19 @@ def detecter_recurrences(
         if not periode:
             continue
         nom, p = periode
-        conformes = sum(abs(i - p) / p <= config.tolerance_intervalle for i in intervalles)
-        if conformes / len(intervalles) < 0.7:
-            continue  # courses, restaurants... : fréquents mais irréguliers
-
         montants = [abs(t.montant) for t, _ in elements]
         moyenne = statistics.mean(montants)
+        conformes = sum(abs(i - p) / p <= config.tolerance_intervalle for i in intervalles)
+        # Un loyer payé à date variable (le 1er, puis le 5, puis le 15) reste mensuel : même montant
+        # presque tous les mois, un ou deux paiements par mois au plus
+        mois_payes = {(d.year, d.month) for d in jours}
+        mensuel_a_date_variable = (
+            nom == "mensuelle" and len(mois_payes) >= 0.6 * len(mois) and len(jours) <= 1.5 * len(mois_payes)
+            and statistics.pstdev(montants) / moyenne <= config.tolerance_montant / 2
+        )
+        if conformes / len(intervalles) < 0.7 and not mensuel_a_date_variable:
+            continue  # courses, restaurants... : fréquents mais irréguliers
+
         variable = (
             len(montants) > 1 and statistics.pstdev(montants) / moyenne > config.tolerance_montant / 2
         )
@@ -104,6 +115,36 @@ def detecter_recurrences(
             )
         )
     return sorted(resultats, key=lambda g: -g.montant_mensuel)
+
+
+ANNUELLES = {"assurance", "abonnement", "impots_taxes"}
+
+
+def reperer_annuels(
+    transactions: list[TransactionCategorisee], groupes: list[GroupeRecurrent], montant_min: float = 50.0
+) -> list[GroupeRecurrent]:
+    """Dépense payée une fois par an (assurance auto, abonnement annuel, taxe foncière) : une seule fois
+    sur au moins six mois de relevés, d'au moins montant_min € remboursements déduits. Ramenée au mois
+    comme si elle revenait l'an prochain ; detecter_recurrences ne la voit pas (trois paiements au moins)."""
+    if len({t.date[:7] for t in transactions if _date(t.date)}) < 6:
+        return []
+    deja = {g.cle for g in groupes}
+    par_cle: dict[str, list[TransactionCategorisee]] = defaultdict(list)
+    for t in transactions:
+        if t.categorie in ANNUELLES and _date(t.date):
+            par_cle[cle_libelle(t.libelle)].append(t)
+    resultats = []
+    for cle, liste in par_cle.items():
+        debits = [t for t in liste if t.montant < 0]
+        net = -sum(t.montant for t in liste)
+        if cle in deja or len(debits) != 1 or net < montant_min:
+            continue
+        resultats.append(GroupeRecurrent(
+            cle=cle, libelle=debits[0].libelle, categorie=debits[0].categorie, periodicite="annuelle",
+            occurrences=1, montant_moyen=round(net, 2), montant_mensuel=round(net / 12, 2),
+            montant_variable=False, dates=[debits[0].date],
+        ))
+    return resultats
 
 
 def cle_beneficiaire(libelle: str) -> str:

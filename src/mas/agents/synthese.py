@@ -5,6 +5,7 @@ Tous les chiffres sont calculés en Python ; le LLM ne rédige que le commentair
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 
 import dspy
@@ -21,9 +22,11 @@ TITRES = {
 # Argent qui ne fait que changer de compte : montré à part, jamais compté comme une dépense
 TRANSFERTS = {
     "epargne": "Épargne (tes livrets, LDD…)",
+    "entre_tes_comptes": "Entre tes comptes (débité sur un relevé, crédité sur un autre)",
     "tes_comptes": "Tes autres comptes déclarés",
     "a_ton_nom": "Comptes à ton nom (à confirmer)",
     "proches": "Virements avec des proches (mis à part)",
+    "exceptionnel": "Achat exceptionnel et son financement (hors moyenne mensuelle)",
 }
 
 
@@ -70,6 +73,87 @@ def solder_proches(transactions: list[TransactionCategorisee]) -> tuple[dict[str
     return totaux, par_mois
 
 
+NATURES_PROCHES = {
+    "recus": "Reçus seulement",
+    "allers_retours": "Allers-retours (avances, remboursements)",
+    "regulier": "Régulier (presque tous les mois)",
+    "ponctuel": "Ponctuel (un ou deux virements)",
+    "occasionnel": "Occasionnel",
+}
+
+
+def proches_par_personne(transactions: list[TransactionCategorisee]) -> list[dict]:
+    """Virements avec des proches, personne par personne (pseudonyme, sinon premier mot du libellé),
+    sur toute la période : ce que chacun ajoute aux dépenses, son plus gros virement et chaque
+    opération. De quoi voir qui pèse dans le total et repérer ce qui n'est pas un proche (un compte
+    à toi, un loyer…). Du plus gros poids dans les dépenses au plus petit."""
+    par_personne: dict[str, list[TransactionCategorisee]] = defaultdict(list)
+    for t in transactions:
+        if t.categorie == "virement_personnel":
+            par_personne[cle_beneficiaire(t.libelle)].append(t)
+    nb_mois = len({t.date[:7] for t in transactions}) or 1
+    detail = []
+    for personne, liste in par_personne.items():
+        totaux, _ = solder_proches(liste)       # mêmes règles que le total : remboursements déduits
+        envois = [t for t in liste if t.montant < 0]
+        mois_envois = {t.date[:7] for t in envois}
+        if not envois:
+            nature = "recus"
+        elif totaux["recu"] >= 0.5 * totaux["envoye"]:
+            nature = "allers_retours"
+        elif len(mois_envois) >= 3 and len(mois_envois) >= 0.6 * nb_mois:
+            nature = "regulier"
+        else:
+            nature = "ponctuel" if len(envois) <= 2 else "occasionnel"
+        plus_gros = min(envois, key=lambda t: t.montant) if envois else None
+        detail.append({
+            "personne": personne,
+            "virements": len(liste),
+            **{k: round(totaux[k], 2) for k in ("envoye", "recu", "depense", "revenu")},
+            "nature": nature,
+            "plus_gros": {"date": plus_gros.date, "montant": round(-plus_gros.montant, 2)} if plus_gros else None,
+            "operations": [{"date": t.date, "libelle": t.libelle, "montant": round(t.montant, 2)}
+                           for t in sorted(liste, key=lambda t: t.date)],
+        })
+    return sorted(detail, key=lambda p: (-p["depense"], -p["envoye"]))
+
+
+SEUIL_A_VERIFIER = 100.0
+
+
+def a_verifier(transactions: list[TransactionCategorisee], transferts: list[dict] | None = None,
+               seuil: float = SEUIL_A_VERIFIER) -> list[dict]:
+    """Ce que mas n'a pas pu classer avec certitude et qui pèse dans le budget : à confirmer par toi
+    (analyse.categories, analyse.comptes_personnels). Les plus gros montants d'abord, 20 au plus."""
+    lignes = []
+    for t in transferts or []:
+        if t["type"] == "exceptionnel":
+            raison = ("Prêt débloqué : pas compté comme un revenu." if t["montant"] > 0 else
+                      "Achat exceptionnel, mis à part de la moyenne : vérifie que c'en est bien un.")
+            lignes.append({"date": t["date"], "libelle": t["libelle"], "montant": round(t["montant"], 2),
+                           "categorie": None, "raison": raison})
+    for t in transactions:
+        if abs(t.montant) < seuil:
+            continue
+        if t.categorie == "autre":
+            raison = "Commerçant inconnu : donne sa catégorie dans analyse.categories."
+        elif re.search(r"(?i)^\s*carte\s+\d+\s+\[PERSONNE_\d+\]", t.libelle):   # le commerçant lui-même
+            raison = "Commerçant au nom masqué : si sa catégorie est fausse, corrige-la dans analyse.categories."
+        elif t.categorie == "virement_personnel" and t.montant <= -500:
+            raison = ("Gros virement à un particulier : un achat, un loyer, un de tes comptes "
+                      "(analyse.comptes_personnels) ?")
+        else:
+            continue
+        lignes.append({"date": t.date, "libelle": t.libelle, "montant": round(t.montant, 2),
+                       "categorie": t.categorie, "raison": raison})
+    return sorted(lignes, key=lambda l: -abs(l["montant"]))[:20]
+
+
+def nom_proche(personne: str) -> str:
+    """Pseudonyme entre crochets (remplacé par le vrai nom dans la version personnelle)."""
+    return f"[{personne}]" if re.fullmatch(r"PERSONNE_\d+", personne) else personne
+
+
 def calculer_budget(
     transactions: list[TransactionCategorisee],
     groupes: list[GroupeRecurrent],
@@ -80,6 +164,7 @@ def calculer_budget(
     proches_a_part: bool = False,
     couverture: dict[str, float] | None = None,
     loyers: list[dict] | None = None,
+    recus_de_proches: str = "a_part",
 ) -> dict:
     """Moyennes mensuelles.
 
@@ -87,8 +172,8 @@ def calculer_budget(
       présents dans les opérations) ;
     - `transferts` : mouvements entre tes propres comptes, exclus des dépenses et des revenus ;
     - les remboursements (crédits d'une catégorie de dépense) viennent en déduction de la catégorie ;
-    - virements avec des proches : un remboursement annule le virement qu'il rembourse, seul
-      l'excédent reçu compte comme un revenu (voir `solder_proches`) ;
+    - virements avec des proches : un remboursement annule le virement qu'il rembourse ; l'excédent
+      reçu n'est compté comme un revenu qu'avec recus_de_proches="revenu" (voir `solder_proches`) ;
     - `couverture` (mois -> part des jours couverts par les relevés) signale les mois incomplets.
     """
     mois = sorted({t.date[:7] for t in transactions}) or ["?"]
@@ -121,7 +206,10 @@ def calculer_budget(
     if not proches_a_part and (debits.get("virement_personnel") or credits.get("virement_personnel")):
         debits["virement_personnel"] = proches["depense"]
         credits.pop("virement_personnel", None)
-    revenus = credits.pop("revenu", 0.0) - debits.pop("revenu", 0.0) + (0.0 if proches_a_part else proches["revenu"])
+    # L'argent reçu de proches en plus de ce que tu leur envoies n'est un revenu que si tu le dis
+    # (analyse.recus_de_proches: revenu) : une aide ponctuelle ne se reproduit pas chaque mois
+    en_revenu = not proches_a_part and recus_de_proches == "revenu"
+    revenus = credits.pop("revenu", 0.0) - debits.pop("revenu", 0.0) + (proches["revenu"] if en_revenu else 0.0)
     depenses_cat: dict[str, float] = {}
     for categorie in set(debits) | set(credits):
         net = debits.get(categorie, 0.0) - credits.get(categorie, 0.0)
@@ -153,6 +241,12 @@ def calculer_budget(
     }
     par_mois["totaux"] = [round(sum(l["montants"][i] for l in par_mois["lignes"]), 2)
                           for i in range(len(liste_mois))]
+    # Revenus de chaque mois, pour l'écart revenus − dépenses de la page (jamais envoyés à l'IA)
+    revenus_mois: dict[str, float] = defaultdict(float)
+    for t in transactions:
+        if t.categorie == "revenu":
+            revenus_mois[t.date[:7]] += t.montant
+    par_mois["revenus"] = [round(revenus_mois.get(m, 0.0), 2) for m in liste_mois]
 
     total_oblig = sum(g.montant_mensuel for g in par_nature["obligatoire"])
     return {
@@ -170,6 +264,9 @@ def calculer_budget(
                        for k, v in flux.items() if v["sortis"] or v["rentres"]},
         "proches": ({k: v / n for k, v in proches.items()}
                     if not proches_a_part and (proches["envoye"] or proches["recu"]) else None),
+        "proches_detail": proches_par_personne(transactions),
+        "recus_proches_en_revenu": en_revenu,
+        "a_verifier": a_verifier(transactions, transferts),
         "loyers": loyers or [],
     }
 
@@ -197,9 +294,28 @@ def resume_markdown(budget: dict, classements: list[Classement]) -> str:
         p = budget["proches"]
         l += ["", "### Virements avec des proches (moyenne mensuelle)", "",
               "Un remboursement annule le virement qu'il rembourse : seul l'excédent reçu est un revenu.", "",
-              "| Envoyé | Reçu | Dont remboursements | Compté en dépense | Compté en revenu |",
+              "| Envoyé | Reçu | Dont remboursements | Compté en dépense | "
+              + ("Compté en revenu |" if budget.get("recus_proches_en_revenu") else "Reçu en plus (pas un revenu) |"),
               "|---:|---:|---:|---:|---:|",
               f"| {_eur(p['envoye'])} | {_eur(p['recu'])} | {_eur(p['rembourse'])} | {_eur(p['depense'])} | {_eur(p['revenu'])} |"]
+    if budget.get("proches_detail"):
+        compte = budget.get("proches") is not None      # sinon : mis à part, rien en dépense
+        l += ["", f"#### Par personne (total sur {mois_lisible(budget['nb_mois'])} mois)", "",
+              "| Personne | Virements | Envoyé | Reçu | Compté en dépense | Plus gros virement | Type |",
+              "|---|---:|---:|---:|---:|---:|---|"]
+        for d in budget["proches_detail"][:10]:
+            gros = f"{_eur(d['plus_gros']['montant'])} le {d['plus_gros']['date']}" if d["plus_gros"] else "—"
+            l.append(f"| {nom_proche(d['personne'])} | {d['virements']} | {_eur(d['envoye'])} | {_eur(d['recu'])} | "
+                     f"{_eur(d['depense']) if compte else '—'} | {gros} | {NATURES_PROCHES[d['nature']]} |")
+        if len(budget["proches_detail"]) > 10:
+            reste = budget["proches_detail"][10:]
+            l.append(f"| {len(reste)} autres personnes | {sum(d['virements'] for d in reste)} | "
+                     f"{_eur(sum(d['envoye'] for d in reste))} | {_eur(sum(d['recu'] for d in reste))} | "
+                     f"{_eur(sum(d['depense'] for d in reste)) if compte else '—'} | | |")
+    if budget.get("a_verifier"):
+        l += ["", "### À vérifier", "", "Opérations que mas n'a pas pu classer avec certitude.", "",
+              "| Date | Libellé | Montant | Pourquoi |", "|---|---|---:|---|"]
+        l += [f"| {v['date']} | {v['libelle']} | {_eur(v['montant'])} | {v['raison']} |" for v in budget["a_verifier"][:10]]
     for loyer in budget.get("loyers", []):
         l += ["", f"**Loyer probable :** {_eur(loyer['montant_mensuel'])} par mois versés à [{loyer['beneficiaire']}] "
                   f"pendant {loyer['mois']} mois, comptés dans le logement (déduction : même montant chaque mois)."]
@@ -211,6 +327,8 @@ def resume_markdown(budget: dict, classements: list[Classement]) -> str:
               "|---|---|---|---:|---|"]
         for g in groupes:
             variable = " (montant variable)" if g.montant_variable else ""
+            if g.periodicite != "mensuelle":
+                variable += f" (ramené au mois : {_eur(g.montant_moyen)} payés à chaque fois)"
             l.append(
                 f"| {g.libelle} | {g.categorie} | {g.periodicite} ({g.occurrences}×) | "
                 f"{_eur(g.montant_mensuel)}{variable} | {justif.get(g.cle, '')} |"
@@ -239,14 +357,18 @@ class Synthetiseur(dspy.Module):
         super().__init__()
         self.rediger = dspy.Predict(RedigerSynthese)
 
-    def forward(self, transactions, recurrents, classements, transferts=None, nb_mois=None,
-                periode=None, proches_a_part=False, couverture=None, loyers=None) -> dspy.Prediction:
-        budget = calculer_budget(transactions, recurrents, classements, transferts, nb_mois, periode,
-                                 proches_a_part, couverture, loyers)
-        resume = resume_markdown(budget, classements)
+    def commenter(self, budget: dict, resume: str) -> str:
         try:
-            commentaire = self.rediger(resume_chiffre=resume).synthese
+            return self.rediger(resume_chiffre=resume).synthese
         except Exception as e:
-            commentaire = f"_Synthèse indisponible ({e})._"
+            return f"_Synthèse indisponible ({e})._"
+
+    def forward(self, transactions, recurrents, classements, transferts=None, nb_mois=None,
+                periode=None, proches_a_part=False, couverture=None, loyers=None,
+                recus_de_proches="a_part") -> dspy.Prediction:
+        budget = calculer_budget(transactions, recurrents, classements, transferts, nb_mois, periode,
+                                 proches_a_part, couverture, loyers, recus_de_proches)
+        resume = resume_markdown(budget, classements)
+        commentaire = self.commenter(budget, resume)
         rapport = f"# Analyse budgétaire\n\n{commentaire}\n\n## Chiffres détaillés\n\n{resume}\n"
         return dspy.Prediction(rapport=rapport, budget=budget, commentaire=commentaire)

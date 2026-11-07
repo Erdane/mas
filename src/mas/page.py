@@ -39,7 +39,7 @@ CATEGORIES = {
 TYPES_JETON = {
     "PERSONNE": "Personne", "ADRESSE": "Adresse", "IBAN": "IBAN", "COMPTE": "Compte",
     "TELEPHONE": "Téléphone", "EMAIL": "E-mail", "REF": "Référence", "CARTE": "Carte",
-    "NIR": "N° de sécu", "RIB": "RIB", "DONNEE": "Donnée",
+    "NIR": "N° de sécu", "RIB": "RIB", "DONNEE": "Donnée", "LIEU": "Lieu",
 }
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre",
         "octobre", "novembre", "décembre"]
@@ -77,7 +77,7 @@ ICONE_ALERTE = (
 
 def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | list[str] = 0,
                     traitement: dict | None = None, genere_le: datetime | None = None,
-                    lectures: list[dict] | None = None) -> dict:
+                    lectures: list[dict] | None = None, operations: list | None = None) -> dict:
     """Données de la page (sérialisables en JSON). Les libellés gardent leurs pseudonymes.
     `alertes` : nombre de pages en écart (extraction par l'IA) ou liste de messages de contrôle."""
     messages = [a for a in alertes if isinstance(a, str) and a.startswith("Relevé ")] if isinstance(alertes, list) else []
@@ -88,7 +88,8 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         {
             "nature": nature, "libelle": g.libelle, "categorie": g.categorie,
             "periodicite": g.periodicite, "occurrences": g.occurrences,
-            "montant_mensuel": round(g.montant_mensuel, 2), "variable": g.montant_variable,
+            "montant_mensuel": round(g.montant_mensuel, 2), "montant_moyen": round(g.montant_moyen, 2),
+            "variable": g.montant_variable,
             "justification": justifications.get(g.cle, ""),
         }
         for nature, groupes in budget.get("par_nature", {}).items()
@@ -109,12 +110,20 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
                        for k, v in (budget.get("transferts") or {}).items()},
         "par_mois": budget.get("par_mois") or {},
         "proches": ({k: round(v, 2) for k, v in budget["proches"].items()} if budget.get("proches") else None),
+        "proches_detail": budget.get("proches_detail") or [],    # par personne, libellés pseudonymisés
+        "recus_proches_en_revenu": bool(budget.get("recus_proches_en_revenu")),
+        "a_verifier": budget.get("a_verifier") or [],
         "loyers": budget.get("loyers") or [],
         "synthese": synthese,
         "alertes_extraction": nb_alertes,
         "controles": messages,
         "traitement": traitement,
         "lectures": lectures or [],       # comment chaque relevé a été lu (voir Orchestrateur.lectures)
+        # Chaque opération classée, libellé pseudonymisé : pour la page de détail (catégorie, puis mois)
+        "operations": [{"date": o["date"], "libelle": o["libelle"], "montant": round(o["montant"], 2),
+                        "categorie": o.get("categorie", "autre")}
+                       for o in sorted((o if isinstance(o, dict) else o.model_dump() for o in operations or []),
+                                       key=lambda o: o["date"])],
     }
 
 
@@ -164,6 +173,15 @@ def _date_lisible(iso: str) -> str:
     except (TypeError, ValueError):
         return ""
     return f"le {d.day} {MOIS[d.month - 1]} {d.year} à {d:%H:%M}"
+
+
+def _jour(iso: str) -> str:
+    """« 2026-05-12 » -> « 12 mai 2026 »."""
+    try:
+        d = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return iso
+    return f"{d.day} {MOIS[d.month - 1]} {d.year}"
 
 
 def _attr(texte: str) -> str:
@@ -248,9 +266,11 @@ def _alerte(d: dict) -> str:
 
 TRANSFERTS = {
     "epargne": "vers ton épargne (livrets, LDD…)",
+    "entre_tes_comptes": "entre tes comptes de deux relevés (débité sur l'un, crédité sur l'autre)",
     "tes_comptes": "vers tes autres comptes déclarés",
     "a_ton_nom": "vers des comptes à ton nom",
     "proches": "en virements avec des proches",
+    "exceptionnel": "pour un achat exceptionnel et son financement (hors moyenne mensuelle)",
 }
 
 
@@ -355,12 +375,22 @@ def _notes_categories(d: dict, valeurs: dict[str, str] | None) -> str:
         notes.append(
             f"Virements avec des proches : {_eur(proches['envoye'], 0)} envoyés et {_eur(proches['recu'], 0)} reçus "
             f"par mois, dont {_eur(proches['rembourse'], 0)} de remboursements. Ceux-ci ne comptent ni en dépense ni "
-            f"en revenu : restent {_eur(proches['depense'], 0)} de dépense et {_eur(proches['revenu'], 0)} de revenu."
+            f"en revenu : restent {_eur(proches['depense'], 0)} de dépense, et {_eur(proches['revenu'], 0)} reçus en plus "
+            + ("de ce que tu as envoyé, comptés dans tes revenus." if d.get("recus_proches_en_revenu") else
+               "de ce que tu as envoyé, montrés à part : ce n'est pas un revenu régulier.")
         )
     return "".join(f'<p class="note">{n}</p>' for n in notes)
 
 
-def _categories(d: dict, valeurs: dict[str, str] | None = None) -> str:
+def _lien(detail: str | None, nom_html: str, categorie: str, mois: str | None = None, classe: str = "vers-detail") -> str:
+    """Lien vers la page de détail (catégorie, ou mois d'une catégorie) ; sans page de détail, le texte seul."""
+    if not detail:
+        return nom_html
+    ancre = f"cat-{categorie}" + (f"-{mois}" if mois else "")
+    return f'<a class="{classe}" href="{_attr(detail)}#{ancre}">{nom_html}</a>'
+
+
+def _categories(d: dict, valeurs: dict[str, str] | None = None, page_detail: str | None = None) -> str:
     cats = [c for c in d["categories"] if c["montant"] > 0]
     if not cats:
         return ""
@@ -374,16 +404,17 @@ def _categories(d: dict, valeurs: dict[str, str] | None = None) -> str:
         lignes.append(
             f'<li class="ligne" tabindex="0" data-valeur="{_attr(_eur(m) + " par mois")}" '
             f'data-libelle="{_attr(nom)}" data-detail="{_attr(detail)}">'
-            f'<span class="nom">{html.escape(nom)}</span>'
+            f'<span class="nom">{_lien(page_detail, html.escape(nom), c["categorie"])}</span>'
             f'<span class="piste-cat" aria-hidden="true"><span class="remplissage" style="width:{100 * m / maxi:.2f}%"></span></span>'
             f'<span class="montant">{_eur(m, 0)}</span></li>'
         )
-        rangs.append(f"<tr><td>{html.escape(nom)}</td><td class=\"num\">{_eur(m)}</td>"
+        rangs.append(f"<tr><td>{_lien(page_detail, html.escape(nom), c['categorie'])}</td><td class=\"num\">{_eur(m)}</td>"
                      f"<td class=\"num\">{_eur(12 * m, 0)}</td><td class=\"num\">{_pct(m, total)}</td></tr>")
     return (
         '<section class="categories" aria-labelledby="t-cat">'
         '<h2 id="t-cat">Où va ton argent</h2>'
-        '<p class="intro">Dépenses moyennes par mois, de la plus grosse à la plus petite.</p>'
+        '<p class="intro">Dépenses moyennes par mois, de la plus grosse à la plus petite.'
+        + (" Touche une catégorie pour voir ses dépenses, mois par mois." if page_detail else "") + "</p>"
         f'<ol class="barres">{"".join(lignes)}</ol>'
         '<details><summary>Voir les montants exacts</summary><div class="tableau"><table>'
         '<thead><tr><th>Catégorie</th><th class="num">Par mois</th><th class="num">Par an</th>'
@@ -392,7 +423,30 @@ def _categories(d: dict, valeurs: dict[str, str] | None = None) -> str:
     )
 
 
-def _par_mois(d: dict) -> str:
+def _a_verifier(d: dict, valeurs: dict[str, str] | None) -> str:
+    """Ce que mas n'a pas pu classer avec certitude : à confirmer, et comment le corriger."""
+    lignes = d.get("a_verifier") or []
+    if not lignes:
+        return ""
+    rangs = "".join(
+        f'<tr><td>{_jour(v["date"])}</td><td class="poste">{_texte(v["libelle"], valeurs)}</td>'
+        f'<td>{html.escape(CATEGORIES.get(v["categorie"], v["categorie"]) if v.get("categorie") else "mis à part")}</td>'
+        f'<td class="num">{_eur(v["montant"])}</td><td class="pourquoi">{html.escape(v["raison"])}</td></tr>'
+        for v in lignes
+    )
+    return (
+        '<section class="a-verifier" aria-labelledby="t-ver">'
+        '<h2 id="t-ver">À vérifier</h2>'
+        '<p class="intro">Ces opérations pèsent dans ton budget, et mas n\'a pas pu les classer avec certitude. '
+        "Ce que tu sais d'un commerçant se note dans la section <code>analyse</code> de ton config.yaml, "
+        "sous <code>categories</code> (par exemple <code>GARAGE DUPONT: transport</code>), avec son nom tel que "
+        "tu le vois dans ta version personnelle : il servira à chaque analyse.</p>"
+        '<div class="tableau"><table><thead><tr><th>Date</th><th>Libellé</th><th>Classé en</th>'
+        f'<th class="num">Montant</th><th>Pourquoi</th></tr></thead><tbody>{rangs}</tbody></table></div></section>'
+    )
+
+
+def _par_mois(d: dict, detail: str | None = None) -> str:
     """Tableau catégories × mois ; la couleur de chaque case suit son montant (une seule teinte)."""
     pm = d.get("par_mois") or {}
     mois, lignes = pm.get("mois") or [], pm.get("lignes") or []
@@ -410,19 +464,20 @@ def _par_mois(d: dict) -> str:
         entetes.append(f'<th scope="col" class="num">{MOIS_COURTS[int(num) - 1]}{an}{incomplet}</th>')
         annee_prec = annee
 
-    def cellule(x: float) -> str:
+    def cellule(x: float, categorie: str, m: str) -> str:
         if abs(x) < 0.5:
             return '<td class="num vide">—</td>'
         if x < 0:
-            return f'<td class="num" title="Plus de remboursements que de dépenses ce mois-là">{_eur(x, 0)}</td>'
+            return (f'<td class="num" title="Plus de remboursements que de dépenses ce mois-là">'
+                    f'{_lien(detail, _eur(x, 0), categorie, m, "")}</td>')
         part = round(8 + 47 * min(x / maxi, 1.0))
         return (f'<td class="num" style="background:color-mix(in srgb, var(--cat) {part}%, transparent)">'
-                f"{_eur(x, 0)}</td>")
+                f"{_lien(detail, _eur(x, 0), categorie, m, '')}</td>")
 
     corps = "".join(
         "<tr>"
-        f'<th scope="row">{html.escape(CATEGORIES.get(l["categorie"], l["categorie"].replace("_", " ").capitalize()))}</th>'
-        + "".join(cellule(x) for x in l["montants"])
+        f'<th scope="row">{_lien(detail, html.escape(CATEGORIES.get(l["categorie"], l["categorie"].replace("_", " ").capitalize())), l["categorie"])}</th>'
+        + "".join(cellule(x, l["categorie"], m) for x, m in zip(l["montants"], mois))
         + f'<td class="num moyenne">{_eur(moyennes.get(l["categorie"], 0.0), 0)}</td></tr>'
         for l in lignes
     )
@@ -434,7 +489,8 @@ def _par_mois(d: dict) -> str:
         '<section class="par-mois" aria-labelledby="t-mois">'
         '<h2 id="t-mois">Mois par mois</h2>'
         '<p class="intro">Tes dépenses de chaque catégorie, mois après mois. Plus la case est colorée, '
-        "plus la dépense est élevée.</p>"
+        "plus la dépense est élevée." + (" Touche une case pour voir les opérations de ce mois." if detail else "")
+        + "</p>"
         '<div class="chaleur"><table><thead><tr><th scope="col">Catégorie</th>'
         f'{"".join(entetes)}<th scope="col" class="num moyenne">Moyenne</th></tr></thead>'
         f"<tbody>{corps}</tbody>"
@@ -453,13 +509,97 @@ def _synthese(d: dict, valeurs: dict[str, str] | None) -> str:
         # « **Constat budgétaire** » seul sur sa ligne : un intertitre, pas un paragraphe en gras
         corps = re.sub(r"<p><strong>([^<]+)</strong></p>", r'<p class="intertitre">\1</p>', corps)
         corps = _jetons(_typographie(corps), valeurs)
+    note = ("Analyse sans IA : les catégories viennent de mots-clés et ce texte est calculé sur ton ordinateur."
+            if (d.get("traitement") or {}).get("sans_ia") else
+            "Texte rédigé par l'IA à partir des chiffres de cette page. Les montants, eux, "
+            "sont calculés sur ton ordinateur.")
     return (
         '<section class="synthese" aria-labelledby="t-syn">'
         '<h2 id="t-syn">Ce que dit l\'analyse</h2>'
         f'<div class="prose">{corps}</div>'
-        '<p class="note">Texte rédigé par l\'IA à partir des chiffres de cette page. Les montants, eux, '
-        "sont calculés sur ton ordinateur.</p></section>"
+        f'<p class="note">{html.escape(note, quote=False)}</p></section>'
     )
+
+
+NATURES_PROCHES = {
+    "recus": "Reçus seulement",
+    "allers_retours": "Allers-retours : avances, remboursements",
+    "regulier": "Régulier : presque tous les mois",
+    "ponctuel": "Ponctuel : un ou deux virements",
+    "occasionnel": "Occasionnel",
+}
+
+
+def _nom_proche(personne: str, valeurs: dict[str, str] | None) -> str:
+    jeton = f"[{personne}]"
+    return _texte(jeton if _JETON.fullmatch(jeton) else personne, valeurs)
+
+
+def _proches(d: dict, valeurs: dict[str, str] | None) -> str:
+    """Virements avec des proches, personne par personne : qui pèse dans le total, et chaque virement."""
+    detail = d.get("proches_detail") or []
+    if not detail:
+        return ""
+    n = d["periode"].get("nb_mois") or 1
+    compte = d.get("proches") is not None       # sinon : montrés à part, hors dépenses
+    rangs, listes = [], []
+    for p in detail:
+        nom = _nom_proche(p["personne"], valeurs)
+        dans_depenses = (f'{_eur(p["depense"])}<span class="variable">{_eur(p["depense"] / n, 0)} par mois</span>'
+                         if compte else "—")
+        gros = (f'{_eur(p["plus_gros"]["montant"])}<span class="variable">le {_jour(p["plus_gros"]["date"])}</span>'
+                if p.get("plus_gros") else "—")
+        rangs.append(
+            f'<tr><td class="poste">{nom}</td><td class="num">{p["virements"]}</td>'
+            f'<td class="num">{_eur(p["envoye"])}</td><td class="num">{_eur(p["recu"])}</td>'
+            f'<td class="num">{dans_depenses}</td><td class="num">{gros}</td>'
+            f'<td>{html.escape(NATURES_PROCHES.get(p["nature"], p["nature"]))}</td></tr>'
+        )
+        operations = "".join(
+            f'<tr><td>{_jour(o["date"])}</td><td class="poste">{_texte(o["libelle"], valeurs)}</td>'
+            f'<td class="num">{_eur(o["montant"])}</td></tr>'
+            for o in p["operations"]
+        )
+        listes.append(f'<h3>{nom}</h3><div class="tableau"><table><thead><tr><th>Date</th><th>Libellé</th>'
+                      f'<th class="num">Montant</th></tr></thead><tbody>{operations}</tbody></table></div>')
+    intro = (f"Sur toute la période ({_nb_mois(n)} mois), du plus gros poids dans tes dépenses au plus petit. "
+             "« Compté en dépense » : ce qui reste une fois les remboursements déduits." if compte else
+             f"Sur toute la période ({_nb_mois(n)} mois). Ils sont montrés à part : rien n'est compté en dépense.")
+    return (
+        '<section class="proches" aria-labelledby="t-pro">'
+        '<h2 id="t-pro">Virements avec des proches, personne par personne</h2>'
+        f'<p class="intro">{intro}</p>'
+        '<div class="tableau"><table><thead><tr><th>Personne</th><th class="num">Virements</th>'
+        '<th class="num">Envoyé</th><th class="num">Reçu</th><th class="num">Compté en dépense</th>'
+        f'<th class="num">Plus gros virement</th><th>Type</th></tr></thead><tbody>{"".join(rangs)}</tbody></table></div>'
+        '<p class="note">Un de ces virements va en fait vers un compte à toi ? Ajoute le nom tel qu\'il apparaît sur '
+        "le relevé (ou le nom de la banque, l'IBAN) à <code>comptes_personnels</code>, dans la section "
+        "<code>analyse</code> de ton config.yaml : au prochain <code>mas analyser</code>, il sera mis à part.</p>"
+        f'<details><summary>Voir chaque virement</summary>{"".join(listes)}</details></section>'
+    )
+
+
+def _nb_mois(n: float) -> str:
+    return str(int(n)) if float(n).is_integer() else f"{n:.1f}".replace(".", ",")
+
+
+RYTHMES = {  # périodicité -> (en clair, paiements par an)
+    "hebdomadaire": ("chaque semaine", 52), "mensuelle": ("chaque mois", 12),
+    "bimestrielle": ("tous les deux mois", 6), "trimestrielle": ("chaque trimestre", 4),
+    "semestrielle": ("deux fois par an", 2), "annuelle": ("une fois par an", 1),
+}
+
+
+def _rythme(r: dict) -> str:
+    texte, _ = RYTHMES.get(r["periodicite"], (r["periodicite"], None))
+    return f"{texte}, payé {r['occurrences']} fois" if r["periodicite"] != "mensuelle" else f"{texte}, {r['occurrences']} fois"
+
+
+def _par_an(r: dict) -> float:
+    """Ce qui est payé en un an : le paiement moyen autant de fois que dans une année (une assurance
+    annuelle compte une fois, pas douze), sans l'arrondi du montant ramené au mois."""
+    _, fois = RYTHMES.get(r["periodicite"], (None, None))
+    return r["montant_moyen"] * fois if fois and r.get("montant_moyen") is not None else 12 * r["montant_mensuel"]
 
 
 def _recurrents(d: dict, valeurs: dict[str, str] | None) -> str:
@@ -470,13 +610,15 @@ def _recurrents(d: dict, valeurs: dict[str, str] | None) -> str:
             continue
         mensuel = sum(r["montant_mensuel"] for r in lignes)
         variable = '<span class="variable">montant variable</span>'
+        ramene = '<span class="variable">ramené au mois</span>'
         rangs = "".join(
             "<tr>"
             f'<td class="poste">{_texte(r["libelle"], valeurs)}</td>'
             f'<td>{html.escape(CATEGORIES.get(r["categorie"], r["categorie"]))}</td>'
-            f'<td>{html.escape(r["periodicite"])}, {r["occurrences"]} fois</td>'
-            f'<td class="num">{_eur(r["montant_mensuel"])}{variable if r.get("variable") else ""}</td>'
-            f'<td class="num">{_eur(12 * r["montant_mensuel"], 0)}</td>'
+            f'<td>{html.escape(_rythme(r))}</td>'
+            f'<td class="num">{_eur(r["montant_mensuel"])}{variable if r.get("variable") else ""}'
+            f'{ramene if r["periodicite"] != "mensuelle" else ""}</td>'
+            f'<td class="num">{_eur(_par_an(r), 0)}</td>'
             f'<td class="pourquoi">{_texte(r.get("justification") or "", valeurs)}</td>'
             "</tr>"
             for r in lignes
@@ -512,7 +654,9 @@ def _lectures(d: dict) -> str:
         etat = "juste" if l.get("ok") else "ecart" if l.get("ok") is False else "inconnu"
         rangs.append(f'<tr><td>{l["releve"]}{periode}</td><td class="num">{l["pages"]}</td>'
                      f'<td>{html.escape(l["lecture"])}</td><td class="{etat}">{html.escape(l["controle"])}</td></tr>')
-    conseil = ('<p class="intro">Un relevé lu par l\'IA n\'est pas vérifiable au centime. Pour qu\'il soit lu '
+    constat = ("Un relevé non reconnu n'est pas compté sans l'IA." if (d.get("traitement") or {}).get("sans_ia")
+               else "Un relevé lu par l'IA n'est pas vérifiable au centime.")
+    conseil = (f'<p class="intro">{html.escape(constat, quote=False)} Pour qu\'il soit lu '
                "directement : <code>mas structure</code>, puis « Ta banque n'est pas reconnue ? » dans le README.</p>"
                if any(not l.get("directe") for l in lectures) else "")
     return ('<section class="lectures" aria-labelledby="t-lec">'
@@ -529,7 +673,12 @@ def _pied(d: dict) -> str:
     lignes.append(f"<p>Généré sur ton ordinateur par Mas {quand}.</p>" if quand
                   else "<p>Généré sur ton ordinateur par Mas.</p>")
     t = d.get("traitement")
-    if t:
+    if t and t.get("sans_ia"):
+        lignes.append(
+            f"<p>Analyse sans IA en {_duree(t.get('duree_analyse') or 0)}, aucune donnée envoyée. "
+            f"Anonymisation sur ton ordinateur en {_duree(t.get('duree_anonymisation') or 0)}.</p>"
+        )
+    elif t:
         tokens = (t.get("tokens_entree") or 0) + (t.get("tokens_sortie") or 0)
         tokens_txt = f"{tokens:,}".replace(",", " ")
         cout = t.get("cout_usd")
@@ -549,17 +698,233 @@ def _pied(d: dict) -> str:
 
 # ---------------------------------------------------------------- page
 
-def construire_page(donnees: dict, valeurs: dict[str, str] | None = None) -> str:
+def _signe(x: float, decimales: int = 0) -> str:
+    return ("+" if x >= 0 else "−") + _eur(abs(x), decimales)
+
+
+def _graduation(etendue: float) -> float:
+    """Pas des lignes de repère : trois à six lignes."""
+    for pas in (50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000):
+        if etendue / pas <= 6:
+            return pas
+    return 100000
+
+
+def _repere_euros(v: float, pas: float) -> str:
+    signe = "+" if v > 0 else "−" if v < 0 else ""
+    return f"{signe}{abs(v) / 1000:g} k€" if pas >= 1000 else f"{signe}{abs(v):g} €"
+
+
+def _dessin_ecart(lignes: list[tuple], largeur: int, hauteur: int, marge: int, variante: str) -> str:
+    """Barres de part et d'autre de zéro, une par mois, et la moyenne en pointillé."""
+    droite, haut, bas = 10, 22, 40
+    etroit = variante == "mobile"
+    ecarts = [e for *_, e in lignes]
+    haut_max, bas_max = max(0.0, max(ecarts)), max(0.0, -min(ecarts))
+    pas = _graduation(haut_max + bas_max)
+    haut_max, bas_max = haut_max * 1.08 or pas / 2, bas_max * 1.08 or pas / 2
+    zone = hauteur - haut - bas
+    echelle = zone / (haut_max + bas_max)
+    y0 = haut + haut_max * echelle
+    pas_x = (largeur - marge - droite) / len(lignes)
+    barre = max(pas_x - 4, 1.5)
+    els = []
+    v = -pas * int(bas_max // pas)
+    while v <= haut_max:
+        if v:
+            y = y0 - v * echelle
+            els.append(f'<line class="grille" x1="{marge}" x2="{largeur - droite}" y1="{y:.1f}" y2="{y:.1f}"/>'
+                       f'<text class="axe" x="{marge - 8}" y="{y + 4:.1f}" text-anchor="end">{_repere_euros(v, pas)}</text>')
+        v += pas
+    els.append(f'<line class="zero" x1="{marge}" x2="{largeur - droite}" y1="{y0:.1f}" y2="{y0:.1f}"/>'
+               f'<text class="axe" x="{marge - 8}" y="{y0 + 4:.1f}" text-anchor="end">0</text>')
+    n = len(lignes)
+    tous = n <= (6 if etroit else 12)
+    reperes = ("01", "07") if etroit and n > 12 else ("01", "04", "07", "10")
+    annee_prec, dernier = None, None
+    for i, (m, revenus, depenses, e) in enumerate(lignes):
+        x = marge + i * pas_x + 2
+        h = abs(e) * echelle
+        annee, num = m.split("-")
+        els.append(
+            f'<rect class="{"excedent" if e >= 0 else "depassement"}" x="{x:.1f}" y="{(y0 - h) if e >= 0 else y0:.1f}" '
+            f'width="{barre:.1f}" height="{max(h, 1):.1f}" rx="2" tabindex="0" data-valeur="{_attr(_signe(e))}" '
+            f'data-libelle="{_attr(MOIS[int(num) - 1] + " " + annee)}" '
+            f'data-detail="{_attr(f"revenus {_eur(revenus, 0)}, dépenses {_eur(depenses, 0)}")}"/>')
+        # le premier mois et les repères trimestriels (ou semestriels) ; deux étiquettes trop proches : la seconde saute
+        if tous or ((num in reperes or i == 0) and (dernier is None or i - dernier >= 2)):
+            dernier = i
+            libelle = MOIS_COURTS[int(num) - 1] + (f" {annee[2:]}" if annee != annee_prec else "")
+            annee_prec = annee
+            els.append(f'<text class="axe" x="{x + barre / 2:.1f}" y="{hauteur - 18}" text-anchor="middle">{libelle}</text>')
+    moyenne = sum(ecarts) / n
+    ym = y0 - moyenne * echelle
+    els.append(f'<line class="moyenne" x1="{marge}" x2="{largeur - droite}" y1="{ym:.1f}" y2="{ym:.1f}"/>'
+               f'<text class="libelle-moyenne" x="{largeur - droite - 4}" y="{(ym + 15) if moyenne < 0 else (ym - 7):.1f}" '
+               f'text-anchor="end">moyenne {_signe(moyenne)}</text>')
+    debut, fin = lignes[0][0].split("-"), lignes[-1][0].split("-")
+    aria = (f"Écart entre tes revenus et tes dépenses, de {MOIS[int(debut[1]) - 1]} {debut[0]} à "
+            f"{MOIS[int(fin[1]) - 1]} {fin[0]} : {sum(1 for e in ecarts if e < 0)} mois sur {n} où tu as dépensé "
+            f"plus que tes revenus ; en moyenne, {_signe(moyenne)} par mois.")
+    return (f'<svg class="graphe {variante}" viewBox="0 0 {largeur} {hauteur}" role="img" '
+            f'aria-label="{_attr(aria)}">{"".join(els)}</svg>')
+
+
+def _ecart(d: dict) -> str:
+    """Revenus − dépenses, mois par mois, avec la moyenne : les mois où le budget déborde."""
+    pm = d.get("par_mois") or {}
+    partiels = set(pm.get("partiels") or [])
+    lignes = [(m, r, dep, r - dep) for m, r, dep in zip(pm.get("mois") or [], pm.get("revenus") or [], pm.get("totaux") or [])
+              if m not in partiels]
+    if len(lignes) < 2 or not any(r for _, r, _, _ in lignes):
+        return ""
+    moyenne = sum(e for *_, e in lignes) / len(lignes)
+    rangs = "".join(f'<tr><td>{MOIS[int(m[5:]) - 1]} {m[:4]}</td><td class="num">{_eur(r)}</td>'
+                    f'<td class="num">{_eur(dep)}</td><td class="num">{_signe(e, 2)}</td></tr>' for m, r, dep, e in lignes)
+    note = (" Les mois incomplets sont laissés de côté." if partiels else "")
+    return (
+        '<section class="ecart" aria-labelledby="t-ecart">'
+        '<h2 id="t-ecart">Revenus et dépenses, mois par mois</h2>'
+        '<p class="intro">Ce qu\'il reste de tes revenus une fois tes dépenses payées. Une barre sous zéro : '
+        "ce mois-là, tu as dépensé plus que tes revenus.</p>"
+        + _dessin_ecart(lignes, 720, 280, 64, "bureau") + _dessin_ecart(lignes, 360, 240, 52, "mobile")
+        + '<ul class="legende"><li><span class="pastille excedent" aria-hidden="true"></span>Revenus supérieurs aux dépenses</li>'
+        '<li><span class="pastille depassement" aria-hidden="true"></span>Dépenses supérieures aux revenus</li>'
+        f'<li><span class="trait-moyenne" aria-hidden="true"></span>Moyenne sur {len(lignes)} mois : '
+        f"<strong>{_signe(moyenne)}</strong> par mois</li></ul>"
+        '<details><summary>Voir les montants exacts</summary><div class="tableau"><table><thead><tr><th>Mois</th>'
+        '<th class="num">Revenus</th><th class="num">Dépenses</th><th class="num">Écart</th></tr></thead>'
+        f"<tbody>{rangs}</tbody></table></div></details>"
+        '<p class="note">Les virements entre tes comptes et vers ton épargne ne sont pas des dépenses : ils ne '
+        f"comptent pas ici. Un loyer payé à cheval sur deux mois peut faire paraître l'un lourd et l'autre léger.{note}</p>"
+        "</section>"
+    )
+
+
+# ---------------------------------------------------------------- page de détail
+
+def _libelle_lisible(libelle: str) -> str:
+    """Libellé allégé pour la lecture : sans références de carte, de mandat ni identifiants techniques.
+    Les pseudonymes [JETON_n] restent, pour être masqués ou remis en clair ensuite."""
+    l = re.sub(r"(\d+,\d+)([A-Z]{3})/1euro=[\d,]+", r"(\1 \2)", libelle)
+    l = re.sub(r"(?i)\s*/?\s*(ref\s*)?cb\.?x+\d+.*$", "", l)
+    l = re.sub(r"(?i)\s*/\s*carte \d+x+\d+.*$", "", l)
+    l = re.sub(r"(?i)\s*cb\*\d{4}", "", l)
+    l = re.sub(r"(?i)^carte\s*\d{2}/\d{2}/\d{2}", "Carte ", l)
+    l = re.sub(r"(?i)^carte \d{7} ", "Carte ", l)
+    l = re.sub(r" le \d{2}/\d{2}/\d{2}", "", l)
+    l = re.sub(r"(?i)^(virement (?:sepa |instantané )?(?:émis|reçu)|virement automatique|prélèvement sepa|virement) "
+               r"[0-9a-z]{6,8}\b", r"\1", l)
+    l = re.sub(r"(?i)\s*\(facture:[^)]*\)", "", l)
+    l = re.sub(r"(?i)\s*\bfr\d{2}\s?zzz\w*.*$", "", l)                      # identifiant de créancier SEPA, et la suite
+    l = re.sub(r"(?i)\s+\S+\s+sepa\s+\S+\s+(rcur|frst|ooff|fnal)\b.*$", "", l)  # référence de mandat
+    l = re.sub(r"(?i)\bech \d{6}\b", "", l)
+    l = re.sub(r"(?<![\[_])[A-Za-z:]*\d{8,}[\w-]*|\b0\dx+\d+\b|\b[0-9a-f]{16,}\b", "", l)
+    l = re.sub(r"(?<=[a-z])[A-Z]{1,2}\d{6,}\w*|(?<=[A-Z]{3})[A-Z]\d{6,}\w*", "", l)   # code du magasin collé au nom
+    l = re.sub(r"\b[a-zA-Z]?\d{6,}[a-zA-Z]?\b|(?<=[a-z])\d{6,}\b", "", l)
+    return re.sub(r"\s{2,}", " ", l).strip(" /:-") or libelle
+
+
+def _mois_detail(categorie: str, m: str, ops: list[dict], valeurs: dict[str, str] | None, partiel: bool) -> str:
+    annee, num = m.split("-")
+    total = -sum(o["montant"] for o in ops)
+    rangs = "".join(
+        f'<tr><td class="date">{o["date"][8:10]}/{o["date"][5:7]}</td>'
+        f'<td class="poste">{_texte(_libelle_lisible(o["libelle"]), valeurs)}'
+        + (' <span class="marque">remboursement</span>' if o["montant"] > 0 else "")
+        + f'</td><td class="num">{("+" if o["montant"] > 0 else "") + _eur(abs(o["montant"]))}</td></tr>'
+        for o in ops)
+    return (
+        f'<details id="cat-{categorie}-{m}"><summary><span class="mois">{MOIS[int(num) - 1]} {annee}'
+        + (' <span class="incomplet">incomplet</span>' if partiel else "")
+        + f'</span><span class="total">{_eur(total)}</span>'
+        f'<span class="nb">{len(ops)} opération{"s" if len(ops) > 1 else ""}</span></summary>'
+        '<div class="tableau"><table><thead><tr><th>Date</th><th>Libellé</th><th class="num">Montant</th></tr></thead>'
+        f"<tbody>{rangs}</tbody></table></div></details>"
+    )
+
+
+SCRIPT_DETAIL = """
+(() => {
+  const ouvrir = () => {
+    const id = decodeURIComponent(location.hash.slice(1));
+    const el = id && document.getElementById(id);
+    if (!el) return;
+    // une catégorie : tous ses mois dépliés ; un mois : celui-là seulement
+    if (el.tagName === "DETAILS") el.open = true;
+    else el.querySelectorAll(":scope > details").forEach((d) => { d.open = true; });
+    el.scrollIntoView({ block: "start" });
+  };
+  addEventListener("hashchange", ouvrir);
+  ouvrir();
+})();
+"""
+
+
+def construire_detail(donnees: dict, valeurs: dict[str, str] | None = None, rapport: str = "") -> str:
+    """Page de détail : chaque catégorie de dépense, puis chaque mois, avec toutes ses opérations. Le mois
+    le plus récent en haut. Liée depuis le rapport (`rapport` : nom du fichier de la page du rapport)."""
+    personnelle = valeurs is not None
+    ops = donnees.get("operations") or []
+    nb_mois = (donnees.get("periode") or {}).get("nb_mois") or 1
+    partiels = set((donnees.get("par_mois") or {}).get("partiels") or [])
+    categories = [c for c in donnees.get("categories") or [] if c["montant"] > 0]
+    vues = {c["categorie"] for c in categories}
+    categories += [{"categorie": l["categorie"], "montant": 0.0}
+                   for l in (donnees.get("par_mois") or {}).get("lignes") or [] if l["categorie"] not in vues]
+    sommaire, blocs = [], []
+    for c in categories:
+        k = c["categorie"]
+        nom = html.escape(CATEGORIES.get(k, k.replace("_", " ").capitalize()))
+        les_ops = [o for o in ops if o["categorie"] == k]
+        sommaire.append(f'<li><a href="#cat-{k}">{nom}<span>{_eur(c["montant"], 0)} par mois</span></a></li>')
+        mois = sorted({o["date"][:7] for o in les_ops}, reverse=True)
+        contenu = "".join(_mois_detail(k, m, [o for o in les_ops if o["date"][:7] == m], valeurs, m in partiels)
+                          for m in mois) or '<p class="note">Aucune opération à afficher pour cette catégorie.</p>'
+        blocs.append(
+            f'<section class="detail-cat" id="cat-{k}" aria-labelledby="h-{k}"><h2 id="h-{k}">{nom}</h2>'
+            f'<p class="intro">{_eur(c["montant"], 0)} par mois en moyenne, soit {_eur(c["montant"] * nb_mois, 0)} '
+            f"sur la période, en {len(les_ops)} opération{'s' if len(les_ops) > 1 else ''}. "
+            f"Le mois le plus récent est en haut.</p>{contenu}"
+            f'<p class="retour"><a href="#sommaire">Toutes les catégories</a>'
+            + (f' · <a href="{_attr(rapport)}#t-cat">Retour au rapport</a>' if rapport else "") + "</p></section>")
+    badge = (f'<p class="confidentialite perso">{ICONE_CADENAS}<span><strong>Version personnelle.</strong> '
+             "Elle contient tes vrais noms : garde-la pour toi.</span></p>" if personnelle else
+             f'<p class="confidentialite anonyme">{ICONE_MASQUE}<span><strong>Version anonyme.</strong> '
+             "Les noms restent des pseudonymes.</span></p>")
+    titre = "Le détail de tes dépenses" + ("" if personnelle else " (version anonyme)")
+    corps = (
+        '<header class="tete"><div class="tete-titres"><h1>Le détail de tes dépenses</h1>'
+        f'<p class="periode">{html.escape(_periode_lisible(donnees["periode"]))}. Catégorie par catégorie, mois par mois.</p>'
+        f"</div>{badge}</header>"
+        + (f'<p class="retour"><a href="{_attr(rapport)}">Retour au rapport</a></p>' if rapport else "")
+        + f'<nav class="sommaire" id="sommaire" aria-label="Catégories"><ul>{"".join(sommaire)}</ul></nav>'
+        + "".join(blocs)
+    )
+    return (
+        '<!doctype html>\n<html lang="fr">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="color-scheme" content="light dark">\n'
+        f"<title>{html.escape(titre)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n"
+        f'<main class="feuille"><div class="ruban" aria-hidden="true"></div>{corps}</main>\n'
+        f"<script>{SCRIPT}{SCRIPT_DETAIL}</script>\n</body>\n</html>\n"
+    )
+
+
+def construire_page(donnees: dict, valeurs: dict[str, str] | None = None, detail: str | None = None) -> str:
     """Page complète. `valeurs` (table pseudonyme -> vraie valeur) donne la version personnelle ;
-    sans elle, la version anonyme."""
+    sans elle, la version anonyme. `detail` : nom de la page de détail, vers laquelle mènent les catégories."""
     personnelle = valeurs is not None
     titre = "Analyse budgétaire" + ("" if personnelle else " (version anonyme)")
     corps = (
         _entete(donnees, personnelle)
         + _alerte(donnees)
         + _recap(donnees)
-        + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs)}</div>'
-        + _par_mois(donnees)
+        + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs, detail)}</div>'
+        + _a_verifier(donnees, valeurs)
+        + _ecart(donnees)
+        + _par_mois(donnees, detail)
+        + _proches(donnees, valeurs)
         + _recurrents(donnees, valeurs)
         + _lectures(donnees)
         + _pied(donnees)
@@ -576,12 +941,19 @@ def construire_page(donnees: dict, valeurs: dict[str, str] | None = None) -> str
 
 def ecrire_pages(chemin_md: Path, donnees: dict, valeurs: dict[str, str],
                  ecrire_donnees: bool = True) -> tuple[Path, Path, Path]:
-    """rapport.md -> rapport.html (personnelle), rapport_anonyme.html, rapport.json (données)."""
+    """rapport.md -> rapport.html (personnelle), rapport_anonyme.html, rapport.json (données), et quand
+    les opérations sont là, leur page de détail : rapport_detail.html et rapport_anonyme_detail.html."""
     perso = chemin_md.with_suffix(".html")
     anonyme = chemin_md.with_name(chemin_md.stem + "_anonyme.html")
     chemin_json = chemin_md.with_suffix(".json")
-    perso.write_text(construire_page(donnees, valeurs), encoding="utf-8")
-    anonyme.write_text(construire_page(donnees, None), encoding="utf-8")
+    detail_perso = detail_anonyme = None
+    if donnees.get("operations"):
+        detail_perso = chemin_md.with_name(chemin_md.stem + "_detail.html")
+        detail_anonyme = chemin_md.with_name(chemin_md.stem + "_anonyme_detail.html")
+        detail_perso.write_text(construire_detail(donnees, valeurs, perso.name), encoding="utf-8")
+        detail_anonyme.write_text(construire_detail(donnees, None, anonyme.name), encoding="utf-8")
+    perso.write_text(construire_page(donnees, valeurs, detail_perso and detail_perso.name), encoding="utf-8")
+    anonyme.write_text(construire_page(donnees, None, detail_anonyme and detail_anonyme.name), encoding="utf-8")
     if ecrire_donnees:
         chemin_json.write_text(json.dumps(donnees, ensure_ascii=False, indent=2), encoding="utf-8")
     return perso, anonyme, chemin_json
@@ -779,6 +1151,13 @@ td.pourquoi{color:var(--encre-2)}
 .vide{margin-top:16px;color:var(--encre-2)}
 .lectures{margin-top:clamp(40px,6vw,72px);padding-top:clamp(32px,4vw,48px);border-top:1px solid var(--filet)}
 .lectures .intro{margin-bottom:8px}
+.a-verifier{margin-top:clamp(40px,6vw,72px);padding-top:clamp(32px,4vw,48px);border-top:1px solid var(--filet)}
+.a-verifier table{min-width:760px}
+.proches{margin-top:clamp(40px,6vw,72px);padding-top:clamp(32px,4vw,48px);border-top:1px solid var(--filet)}
+.proches table{min-width:760px}
+.proches details table{min-width:0}
+.proches h3{margin-top:24px;font-size:15px}
+.proches .note{margin-top:14px}
 .lectures td.juste{color:var(--encre-2)}
 .lectures td.ecart{color:var(--critique);font-weight:600}
 .lectures td.inconnu{color:var(--alerte)}
@@ -820,4 +1199,40 @@ td.pourquoi{color:var(--encre-2)}
   .groupe,tr{break-inside:avoid}
   h2,h3{break-after:avoid}
 }
+.graphe{width:100%;height:auto;display:block;margin:12px 0 8px;font-family:var(--police-ui)}
+.graphe .grille{stroke:var(--filet);stroke-width:1}
+.graphe .zero{stroke:var(--encre-3);stroke-width:1.5}
+.graphe .axe{fill:var(--encre-3);font-size:12px}
+.graphe rect:focus-visible{outline:2px solid var(--lagon);outline-offset:2px}
+.graphe .excedent,.pastille.excedent{fill:var(--lagon);background:var(--lagon)}
+.graphe .depassement,.pastille.depassement{fill:var(--s2);background:var(--s2)}
+.graphe .moyenne{stroke:var(--encre);stroke-width:1.75;stroke-dasharray:6 4}
+.graphe .libelle-moyenne{fill:var(--encre);font-size:12px;font-weight:600;paint-order:stroke;stroke:var(--feuille);stroke-width:4px;stroke-linejoin:round}
+.trait-moyenne{display:inline-block;width:18px;border-top:2px dashed var(--encre);flex:none}
+.graphe.mobile{display:none}
+@media (max-width:600px){.graphe.bureau{display:none}.graphe.mobile{display:block}}
+.vers-detail{color:inherit;text-decoration-color:var(--filet);text-underline-offset:3px}
+.vers-detail:hover,.vers-detail:focus-visible{text-decoration-color:var(--lagon)}
+.barres .ligne,.categories tbody tr{position:relative;cursor:pointer}
+.barres .ligne .vers-detail::after,.categories tbody .vers-detail::after{content:"";position:absolute;inset:0}
+.barres .ligne:hover .vers-detail,.categories tbody tr:hover .vers-detail{text-decoration-color:var(--lagon)}
+.chaleur td a{color:inherit;text-decoration:none;display:block}
+.chaleur td a:hover,.chaleur td a:focus-visible{text-decoration:underline}
+.retour{font-family:var(--police-ui);margin:16px 0 0}
+.retour a{color:inherit;text-decoration-color:var(--filet);text-underline-offset:3px}
+.sommaire ul{list-style:none;padding:0;margin:24px 0 0;display:flex;flex-wrap:wrap;gap:8px}
+.sommaire a{display:inline-flex;gap:7px;align-items:baseline;padding:6px 12px;border:1px solid var(--filet);border-radius:999px;color:var(--encre);text-decoration:none;font-family:var(--police-ui)}
+.sommaire a:hover,.sommaire a:focus-visible{border-color:var(--lagon)}
+.sommaire a span{font-size:13px;color:var(--encre-3);font-variant-numeric:tabular-nums}
+.detail-cat{margin-top:44px;scroll-margin-top:16px}
+.detail-cat>details{border-top:1px solid var(--filet);scroll-margin-top:16px}
+.detail-cat summary{display:flex;width:auto;gap:16px;align-items:baseline;padding:10px 8px;color:var(--encre);font-family:var(--police-ui)}
+.detail-cat summary .mois{flex:1;font-weight:600}
+.detail-cat summary .total{font-variant-numeric:tabular-nums;font-weight:600}
+.detail-cat summary .nb{color:var(--encre-3);font-size:14px;min-width:120px;text-align:right}
+.detail-cat details[open]>summary{background:var(--lagon-voile)}
+.detail-cat td.date{white-space:nowrap;color:var(--encre-3)}
+.detail-cat summary .incomplet{font-weight:400;font-style:italic;color:var(--encre-3)}
+.marque{font-size:12px;padding:1px 6px;border-radius:4px;background:var(--lagon-voile);color:var(--lagon);font-family:var(--police-ui);white-space:nowrap}
+@media (max-width:600px){.detail-cat summary .nb{min-width:0}}
 """

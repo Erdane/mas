@@ -20,10 +20,19 @@ from .anonymisation.reconnaisseurs import MOTS_NON_NOMS, valeur_plausible
 from .config import Config
 from .ingestion import Document, iter_documents
 from .modeles import Transaction
+from .recurrence import cle_beneficiaire
+from .sans_ia import AnalyseSansIA, SyntheseSansIA
 from .verification import Fuite, Verificateur
 
 log = logging.getLogger("mas")
 progression = logging.getLogger("mas.progression")
+
+# Délai entre le débit dans une banque et le crédit dans l'autre : un virement du jeudi peut
+# n'arriver que le mardi (week-end, jour férié)
+ECART_ENTRE_BANQUES = 5
+LOYER = re.compile(r"\bloyer")
+PRET_DEBLOQUE = re.compile(r"(?i)(d[ée]blocage|d[ée]caissement).{0,12}(pr[eê]t|cr[ée]dit|fonds)")
+PRELEVEMENT = re.compile(r"(?i)^\s*(prlv|pr[ée]l[èe]vement|prelev)|echpret|[ée]ch[ée]ance pr[eê]t")
 
 
 class FuiteBloquante(RuntimeError):
@@ -44,6 +53,7 @@ class OperationAnonyme:
     compte: int                     # 0 : compte principal ; 1, 2… : livrets du même relevé
     a_ton_nom: bool = False         # virement dont le bénéficiaire porte un nom déclaré (identite)
     compte_declare: bool = False    # correspond à un compte listé dans analyse.comptes_personnels
+    nom_partiel: bool = False       # contient un mot de ton nom, même seul ou collé (« VIRSEPAMR DUPONT »)
 
 
 @dataclass
@@ -59,7 +69,7 @@ class DocumentAnonymise:
     raison: str = ""           # pourquoi il n'a pas été reconnu
 
 
-def lectures_markdown(lectures: list[dict]) -> str:
+def lectures_markdown(lectures: list[dict], sans_ia: bool = False) -> str:
     if not lectures:
         return ""
     lignes = ["", "## Comment tes relevés ont été lus", "",
@@ -68,7 +78,9 @@ def lectures_markdown(lectures: list[dict]) -> str:
         nom = f"{l['releve']}" + (f" ({l['periode']})" if l["periode"] else "")
         lignes.append(f"| {nom} | {l['pages']} | {l['lecture']} | {l['controle']} |")
     if any(not l["directe"] for l in lectures):
-        lignes += ["", "_Un relevé lu par l'IA n'est pas vérifiable au centime. Pour qu'il soit lu directement : "
+        constat = "Un relevé non reconnu n'est pas compté sans l'IA." if sans_ia else \
+                  "Un relevé lu par l'IA n'est pas vérifiable au centime."
+        lignes += ["", f"_{constat} Pour qu'il soit lu directement : "
                        "`mas structure`, puis « Ta banque n'est pas reconnue ? » dans le README._"]
     return "\n".join(lignes) + "\n"
 
@@ -102,11 +114,19 @@ class Orchestrateur:
     def _a_ton_nom(self, libelle_brut: str) -> bool:
         """Virement vers (ou depuis) quelqu'un qui porte un nom déclaré dans identite.noms.
         Repéré en local sur le libellé en clair, avant anonymisation. C'est une déduction :
-        un homonyme ou un compte joint donnerait le même résultat."""
-        if "vir" not in _simple(libelle_brut):
+        un homonyme ou un compte joint donnerait le même résultat. Un loyer qui porte ton nom en
+        référence (« residence … loyer JEAN DUPONT ») paie quelqu'un d'autre : ce n'en est pas un."""
+        if "vir" not in _simple(libelle_brut) or LOYER.search(_simple(libelle_brut)):
             return False
         mots = _mots(libelle_brut)
         return any(nom <= mots for nom in self.noms_declares)
+
+    def _nom_partiel(self, libelle_brut: str) -> bool:
+        """Un mot de ton nom (5 lettres ou plus) dans le libellé en clair, même collé aux autres :
+        chaque banque l'écrit à sa façon (nom seul, « MR NOM PRENOM », sans espaces). Sert seulement
+        à ne pas prendre deux formes de ton nom pour deux personnes différentes."""
+        compact = re.sub(r"[^a-z]", "", _simple(libelle_brut))
+        return any(mot in compact for nom in self.noms_declares for mot in nom if len(mot) >= 5)
 
     def _compte_declare(self, libelle_brut: str) -> bool:
         compact = re.sub(r"\s", "", _simple(libelle_brut))
@@ -178,6 +198,7 @@ class Orchestrateur:
                 operations.append(OperationAnonyme(
                     o.date.isoformat(), libelle, round(o.montant, 2), k,
                     a_ton_nom=self._a_ton_nom(o.libelle), compte_declare=self._compte_declare(o.libelle),
+                    nom_partiel=self._nom_partiel(o.libelle),
                 ))
         resultat.operations = operations
         resultat.periodes = doc.structure.periodes()
@@ -185,7 +206,7 @@ class Orchestrateur:
         resultat.lecture = doc.structure.lecture
 
     @staticmethod
-    def lectures(documents: list[DocumentAnonymise]) -> list[dict]:
+    def lectures(documents: list[DocumentAnonymise], sans_ia: bool = False) -> list[dict]:
         """Comment chaque relevé a été lu, pour l'utilisateur (avant l'envoi) et pour le rapport. Les relevés
         sont numérotés dans l'ordre, sans leur nom de fichier (le rapport anonyme peut être partagé)."""
         lignes = []
@@ -194,9 +215,11 @@ class Orchestrateur:
             periode = (f"du {min(a for a, _ in periodes):%d/%m/%Y} au {max(b for _, b in periodes):%d/%m/%Y}"
                        if periodes else "")
             if d.operations is None:
+                raison = f"mise en page non reconnue ({d.raison or 'raison inconnue'})"
                 lignes.append({"releve": i, "pages": len(d.pages), "periode": periode, "directe": False,
-                               "lecture": f"par l'IA : mise en page non reconnue ({d.raison or 'raison inconnue'})",
-                               "controle": "non vérifiable au centime", "ok": None})
+                               "lecture": f"écarté : {raison}" if sans_ia else f"par l'IA : {raison}",
+                               "controle": "pas compté dans ce rapport" if sans_ia else "non vérifiable au centime",
+                               "ok": None})
                 continue
             ok, detail = d.controles[0] if d.controles else (None, "")
             controle = ("juste au centime" if ok else f"écart : {detail}" if ok is False
@@ -212,19 +235,27 @@ class Orchestrateur:
     def separer_transferts(self, documents: list[DocumentAnonymise]) -> tuple[list[Transaction], list[dict], list[str]]:
         """Compte principal seulement. Met à part l'argent qui ne fait que changer de compte :
         virements vers/depuis les livrets du même relevé (même montant, sens inverse, à 4 jours
-        près), vers des comptes déclarés, et vers un bénéficiaire à ton nom (si configuré)."""
-        principales = [o for d in documents for o in d.operations or [] if o.compte == 0]
-        livrets = [o for d in documents for o in d.operations or [] if o.compte > 0]
+        près), entre deux comptes courants relevés à part (voir `_entre_tes_comptes`), vers des
+        comptes déclarés, et vers un bénéficiaire à ton nom (si configuré)."""
+        principales = [(i, o) for i, d in enumerate(documents) for o in d.operations or [] if o.compte == 0]
+        # Un livret ne reçoit que de son compte courant : jamais apparié avec le relevé d'une autre banque
+        livrets = {i: [o for o in d.operations or [] if o.compte > 0] for i, d in enumerate(documents)}
         a_ton_nom_transfert = self.config.analyse.virements_a_ton_nom == "transfert"
-        transactions, transferts = [], []
-        for o in principales:
-            type_ = None
+        types: dict[int, str] = {}          # rang dans `principales` -> type de transfert
+        for k, (i, o) in enumerate(principales):
             if "vir" in o.libelle.lower():
-                pendant = next((e for e in livrets if abs(e.montant + o.montant) < 0.01
+                pendant = next((e for e in livrets[i] if abs(e.montant + o.montant) < 0.01
                                 and abs((date.fromisoformat(e.date) - date.fromisoformat(o.date)).days) <= 4), None)
                 if pendant is not None:
-                    livrets.remove(pendant)
-                    type_ = "epargne"
+                    livrets[i].remove(pendant)
+                    types[k] = "epargne"
+        for k in self._entre_tes_comptes(documents, principales, exclus=set(types)):
+            types[k] = "entre_tes_comptes"
+        for k in self._achats_exceptionnels(principales, exclus=set(types)):
+            types[k] = "exceptionnel"
+        transactions, transferts = [], []
+        for k, (_, o) in enumerate(principales):
+            type_ = types.get(k)
             if type_ is None and o.compte_declare:
                 type_ = "tes_comptes"
             if type_ is None and o.a_ton_nom and a_ton_nom_transfert:
@@ -242,14 +273,97 @@ class Orchestrateur:
         return transactions, transferts, alertes
 
     @staticmethod
+    def _entre_tes_comptes(documents: list[DocumentAnonymise], principales: list[tuple[int, OperationAnonyme]],
+                           exclus: set[int]) -> set[int]:
+        """Virements entre deux de tes comptes courants relevés à part (deux banques) : un débit dans
+        un relevé, un crédit du même montant dans un autre, à ECART_ENTRE_BANQUES jours près. Rangs
+        appariés dans `principales`.
+
+        Les deux relevés doivent couvrir ensemble le jour du débit ou celui du crédit : deux relevés
+        successifs d'un même compte ne se chevauchent pas, leurs opérations ne sont jamais appariées.
+        Deux libellés qui nomment deux personnes différentes non plus (tu paies l'un, l'autre te
+        rembourse le même montant) ; ton nom, sous quelque forme que ce soit, ne contredit rien."""
+        def couverture(i: int) -> list[tuple[date, date]]:
+            # Période imprimée sur le relevé, sinon les mois entiers de ses opérations (un relevé
+            # mensuel dont la première opération tombe le 3 couvre aussi le 1er)
+            connues = [(debut, fin) for debut, fin in documents[i].periodes if debut and fin]
+            jours = [date.fromisoformat(o.date) for j, o in principales if j == i]
+            if connues or not jours:
+                return connues
+            fin = max(jours)
+            return [(min(jours).replace(day=1), fin.replace(day=monthrange(fin.year, fin.month)[1]))]
+
+        couvertures = {i: couverture(i) for i in {i for i, _ in principales}}
+
+        def couvre(i: int, jour: date) -> bool:
+            return any(debut <= jour <= fin for debut, fin in couvertures[i])
+
+        def qui(o: OperationAnonyme) -> str | None:
+            # « toi » (ton nom, même en partie), le pseudonyme d'une autre personne, ou personne
+            if o.a_ton_nom or o.nom_partiel:
+                return "toi"
+            jeton = re.search(r"\[(PERSONNE_\d+)\]", o.libelle)
+            return jeton.group(1) if jeton else None
+
+        def compatibles(a: OperationAnonyme, b: OperationAnonyme, strict: bool) -> bool:
+            qa, qb = qui(a), qui(b)
+            return qa == qb == "toi" if strict else qa is None or qb is None or qa == qb
+
+        virements = [(k, i, o, date.fromisoformat(o.date)) for k, (i, o) in enumerate(principales)
+                     if k not in exclus and "vir" in o.libelle.lower() and not LOYER.search(o.libelle.lower())]
+        debits = sorted((v for v in virements if v[2].montant < 0), key=lambda v: v[3])
+        credits = [v for v in virements if v[2].montant > 0]
+        apparies: set[int] = set()
+        # D'abord les paires où les deux libellés portent ton nom : un virement à un ami du même
+        # montant, la veille, ne prend pas la place de ton virement entre tes comptes
+        for strict in (True, False):
+            for k, i, o, jour in debits:
+                if k in apparies:
+                    continue
+                candidats = [c for c in credits
+                             if c[0] not in apparies and c[1] != i and abs(c[2].montant + o.montant) < 0.01
+                             and abs((c[3] - jour).days) <= ECART_ENTRE_BANQUES
+                             and any(couvre(i, x) and couvre(c[1], x) for x in (jour, c[3]))
+                             and compatibles(o, c[2], strict)]
+                if candidats:
+                    apparies |= {k, min(candidats, key=lambda c: abs((c[3] - jour).days))[0]}
+        return apparies
+
+    def _achats_exceptionnels(self, principales: list[tuple[int, OperationAnonyme]], exclus: set[int]) -> set[int]:
+        """Un achat exceptionnel (voiture, travaux…) : les paiements à un même bénéficiaire en 7 jours
+        qui font ensemble au moins analyse.achat_exceptionnel_min € (prélèvements exceptés : impôts et
+        mensualités comptent), et un prêt débloqué, qui n'est pas un revenu. Rangs dans `principales`."""
+        seuil = self.config.analyse.achat_exceptionnel_min
+        if seuil <= 0:
+            return set()
+        retenus = {k for k, (_, o) in enumerate(principales)
+                   if k not in exclus and o.montant > 0 and PRET_DEBLOQUE.search(o.libelle)}
+        debits = sorted(((k, o, date.fromisoformat(o.date)) for k, (_, o) in enumerate(principales)
+                         if k not in exclus and o.montant < 0 and not PRELEVEMENT.search(o.libelle)
+                         and not LOYER.search(o.libelle.lower()) and not o.a_ton_nom and not o.compte_declare),
+                        key=lambda d: d[2])
+        par_beneficiaire: dict[str, list[tuple[int, OperationAnonyme, date]]] = {}
+        for d in debits:
+            par_beneficiaire.setdefault(cle_beneficiaire(d[1].libelle), []).append(d)
+        for liste in par_beneficiaire.values():
+            for i, (_, _, debut) in enumerate(liste):
+                fenetre = [d for d in liste[i:] if (d[2] - debut).days <= 7]
+                if -sum(d[1].montant for d in fenetre) >= seuil:
+                    retenus |= {d[0] for d in fenetre}
+        return retenus
+
+    @staticmethod
     def periode_couverte(documents: list[DocumentAnonymise]) -> tuple[float | None, str | None]:
         """Nombre de mois d'après les dates des relevés (solde précédent -> nouveau solde),
-        arrondi au demi-mois ; plus fiable que les dates d'opérations."""
+        arrondi au demi-mois ; plus fiable que les dates d'opérations. Les jours couverts par
+        plusieurs relevés (deux banques, mêmes mois) ne comptent qu'une fois."""
         periodes = [p for d in documents for p in d.periodes if p[0] and p[1] and p[1] > p[0]]
         if not periodes:
             return None, None
-        jours = sum((fin - debut).days for debut, fin in periodes)
-        mois = max(0.5, round(jours / 30.44 * 2) / 2)
+        jours: set[date] = set()
+        for debut, fin in periodes:
+            jours.update(debut + timedelta(days=k) for k in range((fin - debut).days))
+        mois = max(0.5, round(len(jours) / 30.44 * 2) / 2)
         debut = min(p[0] for p in periodes)
         fin = max(p[1] for p in periodes)
         return mois, f"{debut:%Y-%m} → {fin:%Y-%m}"
@@ -281,6 +395,7 @@ class Orchestrateur:
         programme = AnalyseReleve(
             self.config.recurrence,
             loyer_montant_min=analyse.loyer_montant_min if analyse.loyers_sans_libelle == "detecter" else None,
+            categories=analyse.categories,
         )
         chemin = Path(self.config.optimisation.programme_optimise)
         if chemin.exists():
@@ -312,23 +427,48 @@ class Orchestrateur:
                 t, retours = programme.extraire(pages)
                 transactions += t
                 alertes += retours
-            analyse = programme.analyser_transactions(transactions, alertes)
+            analyse = programme.analyser_transactions(transactions, alertes, en_clair=self.coffre.depseudonymiser)
             progression.info("[5/5] Rédaction de la synthèse…")
-            nb_mois, periode = self.periode_couverte(lus) if lus and not a_extraire else (None, None)
-            couverture = self.couverture_mois(lus) if lus and not a_extraire else None
-            synthese = Synthetiseur()(
-                transactions=analyse.transactions,
-                recurrents=analyse.recurrents,
-                classements=analyse.classements,
-                transferts=transferts,
-                nb_mois=nb_mois,
-                periode=periode,
-                proches_a_part=self.config.analyse.virements_a_des_proches == "a_part",
-                couverture=couverture,
-                loyers=analyse.get("loyers", []),
-            )
-        lectures = self.lectures(documents)
-        section = lectures_markdown(lectures)        # écrite ici, en Python : jamais envoyée à l'IA
+            return self._conclure(Synthetiseur(), documents, analyse, transferts,
+                                  connus=lus if not a_extraire else [])
+
+    def analyser_sans_ia(self, documents: list[DocumentAnonymise]) -> dspy.Prediction:
+        """Aucun modèle n'est configuré ici : un appel à l'IA échouerait au lieu de partir.
+        Les relevés que seule l'IA sait lire sont écartés et signalés dans le rapport."""
+        lus = [d for d in documents if d.operations is not None]
+        transactions, transferts, alertes = self.separer_transferts(lus)
+        progression.info("[1/5] Lecture directe des tableaux : %d opération(s) sur le compte principal, "
+                         "%d mouvement(s) entre tes comptes mis à part", len(transactions), len(transferts))
+        analyse_cfg = self.config.analyse
+        programme = AnalyseSansIA(
+            self.config.recurrence,
+            loyer_montant_min=analyse_cfg.loyer_montant_min if analyse_cfg.loyers_sans_libelle == "detecter" else None,
+            categories=analyse_cfg.categories,
+            en_clair=self.coffre.depseudonymiser,
+        )
+        analyse = programme.analyser_transactions(transactions, alertes, en_clair=self.coffre.depseudonymiser)
+        progression.info("[5/5] Calcul des constats…")
+        return self._conclure(SyntheseSansIA(), documents, analyse, transferts, connus=lus, sans_ia=True)
+
+    def _conclure(self, synthetiseur: Synthetiseur, documents: list[DocumentAnonymise], analyse: dspy.Prediction,
+                  transferts: list[dict], connus: list[DocumentAnonymise], sans_ia: bool = False) -> dspy.Prediction:
+        """`connus` : les relevés dont on connaît les dates (la période vient d'eux)."""
+        nb_mois, periode = self.periode_couverte(connus) if connus else (None, None)
+        couverture = self.couverture_mois(connus) if connus else None
+        synthese = synthetiseur(
+            transactions=analyse.transactions,
+            recurrents=analyse.recurrents,
+            classements=analyse.classements,
+            transferts=transferts,
+            nb_mois=nb_mois,
+            periode=periode,
+            proches_a_part=self.config.analyse.virements_a_des_proches == "a_part",
+            recus_de_proches=self.config.analyse.recus_de_proches,
+            couverture=couverture,
+            loyers=analyse.get("loyers", []),
+        )
+        lectures = self.lectures(documents, sans_ia)
+        section = lectures_markdown(lectures, sans_ia)     # écrite ici, en Python : jamais envoyée à l'IA
         return dspy.Prediction(
             analyse=analyse,
             transferts=transferts,
