@@ -20,6 +20,7 @@ from .anonymisation.reconnaisseurs import MOTS_NON_NOMS, valeur_plausible
 from .config import Config
 from .ingestion import Document, iter_documents
 from .modeles import Transaction
+from .releve import type_de_compte
 from .recurrence import cle_beneficiaire
 from .sans_ia import AnalyseSansIA, SyntheseSansIA
 from .verification import Fuite, Verificateur
@@ -67,6 +68,103 @@ class DocumentAnonymise:
     controles: list[tuple[bool | None, str]] = field(default_factory=list)   # un par compte
     lecture: str = ""          # comment le tableau a été lu (vide : par l'IA)
     raison: str = ""           # pourquoi il n'a pas été reconnu
+    # Un par compte du relevé : {"type": "Compte courant" | "Livret A" | "LDDS"…, "solde_debut", "solde_fin"}
+    # (soldes : [date ISO ou None, montant] imprimés par la banque). Le type seul, jamais le titre complet.
+    comptes: list[dict] = field(default_factory=list)
+
+
+INTERETS = re.compile(r"int[ée]r[eê]ts?", re.IGNORECASE)
+
+
+def bilan_livrets(documents: list[DocumentAnonymise]) -> list[dict]:
+    """Livret par livret (Livret A, LDDS…) : ce que tu y as versé, ce que tu en as repris, les intérêts et le
+    bilan, d'après les opérations du livret lui-même dans tous les relevés. C'est de l'épargne : ni dépense
+    ni revenu. Les soldes imprimés, quand la banque les donne, servent de contrôle."""
+    livrets: dict[str, dict] = {}
+    for d in documents:
+        for o in d.operations or []:
+            if o.compte == 0 or o.compte >= len(d.comptes):
+                continue
+            b = livrets.setdefault(d.comptes[o.compte]["type"], {"verse": 0.0, "retire": 0.0, "interets": 0.0,
+                                                                 "mois": {}, "debuts": [], "fins": [], "ops": []})
+            b["ops"].append((o.date, o.montant))
+            mois = b["mois"].setdefault(o.date[:7], [0.0, 0.0])
+            if o.montant > 0 and INTERETS.search(o.libelle):
+                b["interets"] += o.montant
+            elif o.montant > 0:
+                b["verse"] += o.montant
+                mois[0] += o.montant
+            else:
+                b["retire"] -= o.montant
+                mois[1] -= o.montant
+        for k, c in enumerate(d.comptes):
+            if k and c["type"] in livrets:
+                if c.get("solde_debut") and c["solde_debut"][0]:
+                    livrets[c["type"]]["debuts"].append(tuple(c["solde_debut"]))
+                if c.get("solde_fin") and c["solde_fin"][0]:
+                    livrets[c["type"]]["fins"].append(tuple(c["solde_fin"]))
+    resultat = []
+    for nom, b in livrets.items():
+        bilan = b["verse"] - b["retire"] + b["interets"]
+        debut, fin = (min(b["debuts"]) if b["debuts"] else None), (max(b["fins"]) if b["fins"] else None)
+        # Contrôle : entre le premier solde imprimé et le dernier, les opérations doivent expliquer la différence
+        ecart = None
+        if debut and fin:
+            entre = sum(m for jour, m in b["ops"] if debut[0] <= jour <= fin[0])
+            ecart = round((fin[1] - debut[1]) - entre, 2)
+        resultat.append({
+            "nom": nom, "verse": round(b["verse"], 2), "retire": round(b["retire"], 2),
+            "interets": round(b["interets"], 2), "bilan": round(bilan, 2),
+            "solde_debut": {"date": debut[0], "montant": debut[1]} if debut else None,
+            "solde_fin": {"date": fin[0], "montant": fin[1]} if fin else None,
+            # un écart avec les soldes imprimés : un relevé manque, ou une opération n'a pas été lue
+            "ecart_soldes": ecart if ecart and abs(ecart) >= 1 else None,
+            "mois": [{"mois": m, "verse": round(v, 2), "retire": round(r, 2)} for m, (v, r) in sorted(b["mois"].items())],
+        })
+    # le Livret A d'abord, puis par argent remué
+    return sorted(resultat, key=lambda x: (x["nom"] != "Livret A", -(x["verse"] + x["retire"])))
+
+
+_MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre",
+         "novembre", "décembre"]
+
+
+def _date_md(iso: str) -> str:
+    try:
+        d = date.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return str(iso)
+    return f"{d.day} {_MOIS[d.month - 1]} {d.year}"
+
+
+def _eur_md(x: float) -> str:
+    return f"{x:,.2f} €".replace(",", "\u202f").replace(".", ",")
+
+
+def livrets_markdown(livrets: list[dict]) -> str:
+    """Section « Tes livrets » du rapport, écrite en Python : jamais envoyée à l'IA."""
+    if not livrets:
+        return ""
+    lignes = ["", "## Tes livrets", "",
+              "De l'épargne : ni dépense ni revenu. Ce que tu y as versé, ce que tu en as repris (vers ton compte "
+              "courant ou ailleurs), les intérêts, et le bilan sur la période.", "",
+              "| Livret | Versé | Repris | Intérêts | Bilan |", "|---|---:|---:|---:|---:|"]
+    for b in livrets:
+        signe = "+" if b["bilan"] >= 0 else "−"
+        lignes.append(f"| {b['nom']} | {_eur_md(b['verse'])} | {_eur_md(b['retire'])} | {_eur_md(b['interets'])} "
+                      f"| **{signe}{_eur_md(abs(b['bilan']))}** |")
+    lignes.append("")
+    for b in livrets:
+        sens = (f"tu y as mis {_eur_md(b['bilan'])} de plus que tu n'en as repris" if b["bilan"] >= 0
+                else f"tu en as repris {_eur_md(-b['bilan'])} de plus que tu n'y as mis")
+        phrase = f"- **{b['nom']} :** {sens}, intérêts compris."
+        if b["solde_debut"] and b["solde_fin"]:
+            phrase += (f" Solde : {_eur_md(b['solde_debut']['montant'])} le {_date_md(b['solde_debut']['date'])}, "
+                       f"{_eur_md(b['solde_fin']['montant'])} le {_date_md(b['solde_fin']['date'])}.")
+        if b["ecart_soldes"]:
+            phrase += f" Écart de {_eur_md(b['ecart_soldes'])} avec les soldes imprimés : un relevé manque peut-être."
+        lignes.append(phrase)
+    return "\n".join(lignes) + "\n"
 
 
 def lectures_markdown(lectures: list[dict], sans_ia: bool = False) -> str:
@@ -203,6 +301,10 @@ class Orchestrateur:
         resultat.operations = operations
         resultat.periodes = doc.structure.periodes()
         resultat.controles = [c.controle() for c in doc.structure.comptes]
+        solde = lambda s: [s[0].isoformat() if s[0] else None, round(s[1], 2)] if s else None
+        resultat.comptes = [{"type": "Compte courant" if k == 0 else type_de_compte(c.nom),
+                             "solde_debut": solde(c.solde_debut), "solde_fin": solde(c.solde_fin)}
+                            for k, c in enumerate(doc.structure.comptes)]
         resultat.lecture = doc.structure.lecture
 
     @staticmethod
@@ -468,11 +570,14 @@ class Orchestrateur:
             loyers=analyse.get("loyers", []),
         )
         lectures = self.lectures(documents, sans_ia)
-        section = lectures_markdown(lectures, sans_ia)     # écrite ici, en Python : jamais envoyée à l'IA
+        livrets = bilan_livrets(documents)
+        # écrites ici, en Python : jamais envoyées à l'IA
+        section = livrets_markdown(livrets) + lectures_markdown(lectures, sans_ia)
         return dspy.Prediction(
             analyse=analyse,
             transferts=transferts,
             lectures=lectures,
+            livrets=livrets,
             rapport_anonyme=synthese.rapport + section,
             # Dé-pseudonymisation 100 % locale : les vrais noms ne sont remis qu'ici
             rapport=self.coffre.depseudonymiser(synthese.rapport) + section,

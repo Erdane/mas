@@ -11,7 +11,7 @@ from collections import defaultdict
 import dspy
 
 from ..modeles import Classement, GroupeRecurrent, TransactionCategorisee
-from ..recurrence import cle_beneficiaire
+from ..recurrence import cle_beneficiaire, cle_libelle
 from .signatures import RedigerSynthese
 
 TITRES = {
@@ -241,6 +241,17 @@ def calculer_budget(
     }
     par_mois["totaux"] = [round(sum(l["montants"][i] for l in par_mois["lignes"]), 2)
                           for i in range(len(liste_mois))]
+    # Dans chaque case, la part des dépenses récurrentes « à payer quoi qu'il arrive » (pour la page)
+    obligatoires = par_nature.get("obligatoire", [])
+    cles = {g.cle for g in obligatoires}
+    paiements = {(cle_beneficiaire(g.libelle), d) for g in obligatoires for d in g.dates}
+    oblig_mois: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        if t.montant < 0 and (cle_libelle(t.libelle) in cles or (cle_beneficiaire(t.libelle), t.date) in paiements):
+            oblig_mois[t.categorie][t.date[:7]] += -t.montant
+    for ligne in par_mois["lignes"]:
+        ligne["obligatoire"] = [round(min(oblig_mois[ligne["categorie"]].get(m, 0.0), max(x, 0.0)), 2)
+                                for m, x in zip(liste_mois, ligne["montants"])]
     # Revenus de chaque mois, pour l'écart revenus − dépenses de la page (jamais envoyés à l'IA)
     revenus_mois: dict[str, float] = defaultdict(float)
     for t in transactions:

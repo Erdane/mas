@@ -77,7 +77,8 @@ ICONE_ALERTE = (
 
 def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | list[str] = 0,
                     traitement: dict | None = None, genere_le: datetime | None = None,
-                    lectures: list[dict] | None = None, operations: list | None = None) -> dict:
+                    lectures: list[dict] | None = None, operations: list | None = None,
+                    livrets: list[dict] | None = None) -> dict:
     """Données de la page (sérialisables en JSON). Les libellés gardent leurs pseudonymes.
     `alertes` : nombre de pages en écart (extraction par l'IA) ou liste de messages de contrôle."""
     messages = [a for a in alertes if isinstance(a, str) and a.startswith("Relevé ")] if isinstance(alertes, list) else []
@@ -119,6 +120,7 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "controles": messages,
         "traitement": traitement,
         "lectures": lectures or [],       # comment chaque relevé a été lu (voir Orchestrateur.lectures)
+        "livrets": livrets or [],         # bilan de chaque livret (voir orchestrateur.bilan_livrets)
         # Chaque opération classée, libellé pseudonymisé : pour la page de détail (catégorie, puis mois)
         "operations": [{"date": o["date"], "libelle": o["libelle"], "montant": round(o["montant"], 2),
                         "categorie": o.get("categorie", "autre")}
@@ -464,20 +466,31 @@ def _par_mois(d: dict, detail: str | None = None) -> str:
         entetes.append(f'<th scope="col" class="num">{MOIS_COURTS[int(num) - 1]}{an}{incomplet}</th>')
         annee_prec = annee
 
-    def cellule(x: float, categorie: str, m: str) -> str:
+    def cellule(x: float, categorie: str, m: str, oblig: float = 0.0) -> str:
         if abs(x) < 0.5:
             return '<td class="num vide">—</td>'
         if x < 0:
             return (f'<td class="num" title="Plus de remboursements que de dépenses ce mois-là">'
                     f'{_lien(detail, _eur(x, 0), categorie, m, "")}</td>')
         part = round(8 + 47 * min(x / maxi, 1.0))
-        return (f'<td class="num" style="background:color-mix(in srgb, var(--cat) {part}%, transparent)">'
-                f"{_lien(detail, _eur(x, 0), categorie, m, '')}</td>")
+        texte = _lien(detail, _eur(x, 0), categorie, m, "")
+        if oblig >= 0.5:
+            # La part « à payer quoi qu'il arrive » dans sa couleur, le reste dans celle des autres dépenses,
+            # chacune sur la largeur de son montant
+            coupe = min(oblig / x, 1.0) * 100
+            # un bleu toujours reconnaissable, même pour un petit montant (sinon il se confond avec le gris)
+            fond = (f"linear-gradient(90deg, color-mix(in srgb, var(--s1) {max(part, 24)}%, transparent) {coupe:.0f}%, "
+                    f"color-mix(in srgb, var(--cat) {part}%, transparent) {coupe:.0f}%)")
+            reste = x - oblig
+            titre = (f"{_eur(oblig, 0)} à payer quoi qu'il arrive" + (f", {_eur(reste, 0)} d'autres dépenses" if reste >= 0.5 else ""))
+            return f'<td class="num oblig" title="{_attr(titre)}" style="background:{fond}">{texte}</td>'
+        return f'<td class="num" style="background:color-mix(in srgb, var(--cat) {part}%, transparent)">{texte}</td>'
 
     corps = "".join(
         "<tr>"
         f'<th scope="row">{_lien(detail, html.escape(CATEGORIES.get(l["categorie"], l["categorie"].replace("_", " ").capitalize())), l["categorie"])}</th>'
-        + "".join(cellule(x, l["categorie"], m) for x, m in zip(l["montants"], mois))
+        + "".join(cellule(x, l["categorie"], m, o) for x, m, o
+                  in zip(l["montants"], mois, l.get("obligatoire") or [0.0] * len(mois)))
         + f'<td class="num moyenne">{_eur(moyennes.get(l["categorie"], 0.0), 0)}</td></tr>'
         for l in lignes
     )
@@ -485,6 +498,12 @@ def _par_mois(d: dict, detail: str | None = None) -> str:
     note = ('<p class="note">Mois incomplet : les relevés n\'en couvrent qu\'une partie, ses montants sont '
             "donc plus bas. La moyenne, elle, est calculée sur la durée réelle des relevés.</p>"
             if partiels else "")
+    if any(o >= 0.5 for l in lignes for o in l.get("obligatoire") or []):
+        note = ('<ul class="legende"><li><span class="pastille s1" aria-hidden="true"></span>À payer quoi qu\'il arrive '
+                "(tes dépenses récurrentes obligatoires)</li>"
+                '<li><span class="pastille cat" aria-hidden="true"></span>Tes autres dépenses</li></ul>'
+                '<p class="note">Une case des deux couleurs mêle les deux : chaque couleur y occupe la part de son '
+                "montant. Survole-la pour voir le détail.</p>") + note
     return (
         '<section class="par-mois" aria-labelledby="t-mois">'
         '<h2 id="t-mois">Mois par mois</h2>'
@@ -801,6 +820,45 @@ def _ecart(d: dict) -> str:
     )
 
 
+def _livrets(d: dict) -> str:
+    """Tes livrets : ce que tu y as mis, ce que tu en as repris, les intérêts, et le bilan (gain ou perte)."""
+    livrets = d.get("livrets") or []
+    if not livrets:
+        return ""
+    maxi = max(max(b["verse"], b["retire"]) for b in livrets) or 1.0
+    cartes = []
+    for b in livrets:
+        gain = b["bilan"] >= 0
+        barre = lambda classe, libelle, x: (
+            f'<div class="lv-ligne"><span class="lv-quoi">{libelle}</span>'
+            f'<span class="lv-piste"><span class="lv-barre {classe}" style="width:{100 * x / maxi:.1f}%"></span></span>'
+            f'<span class="lv-montant">{_eur(x, 0)}</span></div>')
+        soldes = ""
+        if b.get("solde_debut") and b.get("solde_fin"):
+            soldes = (f'<p class="note">Solde : {_eur(b["solde_debut"]["montant"], 0)} le {_jour(b["solde_debut"]["date"])}, '
+                      f'{_eur(b["solde_fin"]["montant"], 0)} le {_jour(b["solde_fin"]["date"])}.</p>')
+        if b.get("ecart_soldes"):
+            soldes += (f'<p class="note">Écart de {_eur(b["ecart_soldes"])} avec les soldes imprimés : '
+                       "un relevé manque peut-être.</p>")
+        mois = "".join(f'<tr><td>{MOIS[int(m["mois"][5:]) - 1]} {m["mois"][:4]}</td><td class="num">{_eur(m["verse"])}</td>'
+                       f'<td class="num">{_eur(m["retire"])}</td></tr>' for m in b.get("mois") or [])
+        detail = ('<details><summary>Mois par mois</summary><div class="tableau"><table><thead><tr><th>Mois</th>'
+                  f'<th class="num">Versé</th><th class="num">Repris</th></tr></thead><tbody>{mois}</tbody></table></div>'
+                  "</details>") if mois else ""
+        sens = "de plus que tu n'en as repris" if gain else "de plus que tu n'y as mis"
+        cartes.append(
+            f'<div class="livret"><h3>{html.escape(b["nom"])}</h3>'
+            f'<p class="lv-bilan {"gain" if gain else "perte"}"><strong>{"+" if gain else "−"}{_eur(abs(b["bilan"]), 0)}</strong>'
+            f'<span>{"mis" if gain else "repris"} {sens}, intérêts compris</span></p>'
+            + barre("verse", "Versé", b["verse"]) + barre("repris", "Repris", b["retire"])
+            + f'<p class="lv-interets">Intérêts : <strong>{_eur(b["interets"])}</strong></p>'
+            + soldes + detail + "</div>")
+    return ('<section class="livrets" aria-labelledby="t-livrets"><h2 id="t-livrets">Tes livrets</h2>'
+            '<p class="intro">De l\'épargne : ni dépense ni revenu. Ce que tu y as versé, ce que tu en as repris '
+            "(vers ton compte courant ou ailleurs), les intérêts, et ce qu'il en reste en plus ou en moins sur la période.</p>"
+            f'<div class="lv-grille">{"".join(cartes)}</div></section>')
+
+
 # ---------------------------------------------------------------- page de détail
 
 def _libelle_lisible(libelle: str) -> str:
@@ -819,7 +877,9 @@ def _libelle_lisible(libelle: str) -> str:
     l = re.sub(r"(?i)\s*\bfr\d{2}\s?zzz\w*.*$", "", l)                      # identifiant de créancier SEPA, et la suite
     l = re.sub(r"(?i)\s+\S+\s+sepa\s+\S+\s+(rcur|frst|ooff|fnal)\b.*$", "", l)  # référence de mandat
     l = re.sub(r"(?i)\bech \d{6}\b", "", l)
-    l = re.sub(r"(?<![\[_])[A-Za-z:]*\d{8,}[\w-]*|\b0\dx+\d+\b|\b[0-9a-f]{16,}\b", "", l)
+    # le numéro seul : les lettres collées devant restent (« ECHPRET0001234567 » → « ECHPRET »)
+    l = re.sub(r"(?<![\[_\w])(?:ref\s*:?\s*)?\d{8,}[\w-]*|(?<=[A-Za-z])\d{8,}[\w-]*|\b0\dx+\d+\b|\b[0-9a-f]{16,}\b", "", l,
+               flags=re.IGNORECASE)
     l = re.sub(r"(?<=[a-z])[A-Z]{1,2}\d{6,}\w*|(?<=[A-Z]{3})[A-Z]\d{6,}\w*", "", l)   # code du magasin collé au nom
     l = re.sub(r"\b[a-zA-Z]?\d{6,}[a-zA-Z]?\b|(?<=[a-z])\d{6,}\b", "", l)
     return re.sub(r"\s{2,}", " ", l).strip(" /:-") or libelle
@@ -923,6 +983,7 @@ def construire_page(donnees: dict, valeurs: dict[str, str] | None = None, detail
         + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs, detail)}</div>'
         + _a_verifier(donnees, valeurs)
         + _ecart(donnees)
+        + _livrets(donnees)
         + _par_mois(donnees, detail)
         + _proches(donnees, valeurs)
         + _recurrents(donnees, valeurs)
@@ -1074,6 +1135,7 @@ strong{font-weight:650}
 .legende .part{color:var(--encre-3);font-size:13px}
 .pastille{display:inline-block;width:12px;height:12px;border-radius:2px;flex:none}
 .pastille.s1{background:var(--s1)}.pastille.s2{background:var(--s2)}.pastille.s3{background:var(--s3)}
+.pastille.cat{background:var(--cat)}
 .pastille.piste{background:var(--piste);box-shadow:inset 0 0 0 1px var(--filet)}
 .base{margin-top:10px;font-size:13px;color:var(--encre-3)}
 .hors-depenses{margin-top:22px;padding:14px 16px;border-left:3px solid var(--piste);background:var(--lagon-voile);
@@ -1232,6 +1294,22 @@ td.pourquoi{color:var(--encre-2)}
 .detail-cat summary .nb{color:var(--encre-3);font-size:14px;min-width:120px;text-align:right}
 .detail-cat details[open]>summary{background:var(--lagon-voile)}
 .detail-cat td.date{white-space:nowrap;color:var(--encre-3)}
+.livrets{margin-top:clamp(32px,6vw,64px)}
+.lv-grille{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px 28px}
+.livret{padding-top:14px;border-top:2px solid var(--piste)}
+.lv-bilan{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:6px 0 14px}
+.lv-bilan strong{font-size:30px;line-height:1.1;font-variant-numeric:tabular-nums}
+.lv-bilan span{color:var(--encre-2);font-size:14px}
+.lv-bilan.gain strong{color:var(--s3)}
+.lv-bilan.perte strong{color:var(--critique)}
+.lv-ligne{display:grid;grid-template-columns:64px 1fr auto;align-items:center;gap:10px;margin:6px 0;font-size:14px}
+.lv-quoi{color:var(--encre-2)}
+.lv-piste{height:10px;border-radius:999px;background:var(--piste);overflow:hidden}
+.lv-barre{display:block;height:100%;border-radius:999px}
+.lv-barre.verse{background:var(--s3)}
+.lv-barre.repris{background:var(--s2)}
+.lv-montant{font-variant-numeric:tabular-nums;color:var(--encre);min-width:72px;text-align:right}
+.lv-interets{margin:10px 0 4px;font-size:14px;color:var(--encre-2)}
 .detail-cat summary .incomplet{font-weight:400;font-style:italic;color:var(--encre-3)}
 .marque{font-size:12px;padding:1px 6px;border-radius:4px;background:var(--lagon-voile);color:var(--lagon);font-family:var(--police-ui);white-space:nowrap}
 @media (max-width:600px){.detail-cat summary .nb{min-width:0}}

@@ -2,6 +2,10 @@
 
 Une ligne par commit, écrite par Claude à partir des changements.
 
+## 2026-11-09
+
+- Ajoute les livrets et visualise les dépenses obligatoires dans le budget mensuel
+
 ## 2026-10-20
 
 - Reconnaît plus de relevés sans passer par l'IA

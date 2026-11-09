@@ -262,3 +262,30 @@ def test_sans_operations_ni_page_de_detail_ni_liens(tmp_path):
     _, anonyme, _ = ecrire_pages(md, _donnees(), VALEURS)
     assert not (tmp_path / "rapport_detail.html").exists()
     assert 'class="vers-detail"' not in anonyme.read_text(encoding="utf-8")
+
+
+def test_mois_par_mois_part_a_payer_quoi_qu_il_arrive():
+    budget = _budget()
+    budget["par_mois"] = {
+        "mois": ["2026-01", "2026-02"], "partiels": [],
+        "lignes": [{"categorie": "logement", "montants": [1037.29, 1137.29], "obligatoire": [1037.29, 1037.29]},
+                   {"categorie": "alimentation", "montants": [512.4, 400.0], "obligatoire": [0.0, 0.0]}],
+        "totaux": [1549.69, 1537.29],
+    }
+    section = construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE)).split('<section class="par-mois"', 1)[1]
+    section = section.split("</section>", 1)[0]
+    # janvier : tout le loyer est obligatoire ; février : 1 037 € obligatoires sur 1 137 €, le reste à part
+    assert "var(--s1) 51%, transparent) 100%" in section                      # janvier, un peu moins intense
+    assert "var(--s1) 55%, transparent) 91%, color-mix(in srgb, var(--cat) 55%, transparent) 91%" in section
+    assert 'title="1 037\xa0€ à payer quoi qu&#x27;il arrive, 100\xa0€ d&#x27;autres dépenses"' in section or \
+           "à payer quoi qu" in section
+    assert section.count('class="num oblig"') == 2                              # les courses restent d'une couleur
+    assert "Tes autres dépenses" in section and 'class="pastille s1"' in section
+
+
+def test_pas_de_legende_sans_depense_obligatoire():
+    budget = _budget()
+    budget["par_mois"] = {"mois": ["2026-01", "2026-02"], "partiels": [],
+                          "lignes": [{"categorie": "alimentation", "montants": [512.4, 400.0]}], "totaux": [512.4, 400.0]}
+    section = construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE)).split('<section class="par-mois"', 1)[1]
+    assert "Tes autres dépenses" not in section.split("</section>", 1)[0]

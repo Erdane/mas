@@ -1,6 +1,6 @@
 """Lecture structurée des relevés bancaires, d'après la position des mots dans le PDF.
 
-Certaines banques (la BRED, par exemple) dessinent le tableau des opérations de telle façon que
+Certaines banques dessinent le tableau des opérations (sans bordures, par exemple) de telle façon que
 l'extraction de tableaux de pdfplumber renvoie toute une page en UNE ligne : toutes les dates dans
 une cellule, tous les libellés dans une autre, tous les montants dans une troisième. Impossible
 ensuite de savoir quel montant va avec quel libellé.
@@ -37,6 +37,24 @@ FIN_DE_TABLEAU = re.compile(r"(information prealable|frais constates|detail des 
 SOLDE_PARAGRAPHE = re.compile(
     r"(ancien|nouveau) solde au (\d{2})/(\d{2})/(\d{4})\s*:\s*(-?\s?\d{1,3}(?:[ .  ]\d{3})*,\d{2})")
 REFERENCE_AU = re.compile(r"\bau (\d{2})/(\d{2})/(\d{4})")
+# Type d'un compte d'épargne d'après son titre (« LIVRET A N° … M. DUPONT » → « Livret A ») : seul le type
+# est gardé, jamais le numéro ni le nom
+TYPES_DE_LIVRET = [
+    (re.compile(r"\blivret\s*a\b"), "Livret A"),
+    (re.compile(r"\bldds?\b|developpement durable"), "LDDS"),
+    (re.compile(r"\blep\b|epargne\s+pop"), "LEP"),
+    (re.compile(r"\bpel\b|plan\s*(?:d.?\s*)?epargne logement"), "PEL"),
+    (re.compile(r"\bcel\b|compte\s*(?:d.?\s*)?epargne logement"), "CEL"),
+    (re.compile(r"\bpea\b|plan\s*(?:d.?\s*)?epargne en actions"), "PEA"),
+    (re.compile(r"\bcsl\b|compte sur livret|livret"), "Livret"),
+]
+
+
+def type_de_compte(titre: str) -> str:
+    t = unicodedata.normalize("NFKD", titre).encode("ascii", "ignore").decode().lower()
+    return next((nom for motif, nom in TYPES_DE_LIVRET if motif.search(t)), "Autre compte")
+
+
 # Titre d'un autre compte du même relevé (sinon, une ligne isolée n'ouvre pas de nouveau compte)
 TITRE_COMPTE = re.compile(r"\b(livret|ldds?|lep|pel|cel|pea|epargne|compte|plan|codevi|csl|assurance)\b")
 REFERENCE_LETTRES = re.compile(r"\b(\d{1,2}) (" + "|".join(MOIS) + r") (\d{4})\b")

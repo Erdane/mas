@@ -45,9 +45,9 @@ def test_repartition_par_mois():
     pm = b["par_mois"]
     assert pm["mois"] == ["2026-04", "2026-05"] and pm["partiels"] == ["2026-05"]
     # même ordre que les catégories ; remboursement déduit, argent reçu et épargne exclus
-    assert pm["lignes"] == [{"categorie": "virement_personnel", "montants": [150.0, 0.0]},
-                            {"categorie": "shopping", "montants": [70.0, 0.0]},
-                            {"categorie": "alimentation", "montants": [0.0, 60.0]}]
+    assert pm["lignes"] == [{"categorie": "virement_personnel", "montants": [150.0, 0.0], "obligatoire": [0.0, 0.0]},
+                            {"categorie": "shopping", "montants": [70.0, 0.0], "obligatoire": [0.0, 0.0]},
+                            {"categorie": "alimentation", "montants": [0.0, 60.0], "obligatoire": [0.0, 0.0]}]
     assert pm["totaux"] == [220.0, 60.0]
     assert sum(pm["totaux"]) == b["depenses_mensuelles"] * b["nb_mois"]
     texte = resume_markdown(b, [])
@@ -153,3 +153,20 @@ def test_revenus_de_chaque_mois_pour_l_ecart_de_la_page():
     assert par_mois["mois"] == ["2026-01", "2026-02"]
     assert par_mois["revenus"] == [2500.0, 2600.0] and par_mois["totaux"] == [40.0, 60.0]
     assert "revenus" not in resume_markdown(calculer_budget(ops, [], []), [])   # rien de plus pour l'IA
+
+
+def test_part_obligatoire_de_chaque_case():
+    from mas.modeles import Classement, GroupeRecurrent
+    ops = [T(date="2026-01-05", libelle="PRLV SEPA LOYER RESIDENCE EXEMPLE", montant=-700, categorie="logement"),
+           T(date="2026-01-20", libelle="CB MAGASIN DE MEUBLES", montant=-120, categorie="logement"),
+           T(date="2026-02-05", libelle="PRLV SEPA LOYER RESIDENCE EXEMPLE", montant=-700, categorie="logement"),
+           T(date="2026-01-08", libelle="CB MARCHE", montant=-40, categorie="alimentation")]
+    loyer = GroupeRecurrent(cle="LOYER RESIDENCE EXEMPLE", libelle="PRLV SEPA LOYER RESIDENCE EXEMPLE", categorie="logement",
+                            periodicite="mensuelle", occurrences=2, montant_moyen=700, montant_mensuel=700,
+                            montant_variable=False, dates=["2026-01-05", "2026-02-05"])
+    from mas.recurrence import cle_libelle
+    loyer = loyer.model_copy(update={"cle": cle_libelle(loyer.libelle)})
+    lignes = {l["categorie"]: l for l in calculer_budget(ops, [loyer], [Classement(cle=loyer.cle, nature="obligatoire",
+                                                                                  justification="")])["par_mois"]["lignes"]}
+    assert lignes["logement"]["montants"] == [820.0, 700.0] and lignes["logement"]["obligatoire"] == [700.0, 700.0]
+    assert lignes["alimentation"]["obligatoire"] == [0.0, 0.0]

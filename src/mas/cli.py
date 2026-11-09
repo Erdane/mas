@@ -145,7 +145,7 @@ def _ecrire_rapport(sortie: Path, resultat, traitement: dict, orchestrateur) -> 
     alertes = list(resultat.analyse.alertes_extraction)
     donnees = donnees_rapport(resultat.budget, resultat.analyse.classements, resultat.commentaire,
                               alertes, traitement, lectures=resultat.lectures,
-                              operations=resultat.analyse.transactions)
+                              operations=resultat.analyse.transactions, livrets=resultat.get("livrets"))
     html, html_anonyme, _ = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
     for message in donnees["controles"]:
         console.print(f"[yellow]⚠ {message}[/yellow]")

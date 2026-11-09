@@ -190,8 +190,8 @@ def test_analyse_complete_du_releve_bred(config, releve_bred, monkeypatch):
     assert "Pas compté dans tes dépenses" in page and "vers des comptes à ton nom" in page
     assert "virements_a_ton_nom: depense" in page
     assert b["par_mois"] == {"mois": ["2026-04", "2026-05"], "partiels": ["2026-05"],
-                             "lignes": [{"categorie": "energie", "montants": [81.3, 0.0]},
-                                        {"categorie": "alimentation", "montants": [45.1, 0.0]}],
+                             "lignes": [{"categorie": "energie", "montants": [81.3, 0.0], "obligatoire": [0.0, 0.0]},
+                                        {"categorie": "alimentation", "montants": [45.1, 0.0], "obligatoire": [0.0, 0.0]}],
                              "totaux": [126.4, 0.0], "revenus": [2400.0, 0.0]}
     assert "Mois par mois" in page and "incomplet" in page
 
