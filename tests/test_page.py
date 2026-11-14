@@ -72,6 +72,18 @@ def test_version_personnelle_signale_les_valeurs_remises_en_local():
     assert 'class="masque"' not in page and "Version personnelle" in page
 
 
+def test_la_frise_dit_que_c_est_une_moyenne_et_sur_quelle_periode():
+    # Elle ne doit pas passer pour le mois en cours : une moyenne de toute la période, période écrite d'après les relevés
+    page = construire_page(_donnees())
+    assert "En moyenne, tu dépenses <strong>2" in page and "Moyennes mensuelles de janvier à avril 2026, sur" in page
+    assert ">Ton mois moyen</h2>" in page and "Ton mois type" not in page
+    longue = _donnees()
+    longue["periode"] = {"debut": "2025-03", "fin": "2026-10", "nb_mois": 20}
+    assert "Moyennes mensuelles de mars 2025 à octobre 2026, sur" in construire_page(longue)
+    longue["periode"] = {"debut": "?", "fin": "?", "nb_mois": 0}
+    assert "Moyennes mensuelles, sur" in construire_page(longue)
+
+
 def test_deficit_et_revenus_absents():
     deficit = construire_page(_donnees(revenus=2000, depenses=2509.49))
     assert "tu dépenses de plus" in deficit and 'class="repere"' in deficit and "509 €" in deficit
@@ -289,3 +301,13 @@ def test_pas_de_legende_sans_depense_obligatoire():
                           "lignes": [{"categorie": "alimentation", "montants": [512.4, 400.0]}], "totaux": [512.4, 400.0]}
     section = construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE)).split('<section class="par-mois"', 1)[1]
     assert "Tes autres dépenses" not in section.split("</section>", 1)[0]
+
+
+def test_epargne_d_un_proche_hors_depenses_avec_ce_qui_reste_chez_toi():
+    budget = _budget()                                   # 4 mois
+    budget["transferts"] = {"epargne_proche": {"sortis": 75.0, "rentres": 100.0}}
+    page = construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE))
+    assert "rendus à un proche qui garde son épargne sur ton compte" in page
+    assert "400\u00a0€ reçus et 300\u00a0€ rendus sur la période, soit 100\u00a0€ encore chez toi" in page
+    budget["transferts"]["epargne_proche"]["sortis"] = 100.0
+    assert "encore chez toi" not in construire_page(donnees_rapport(budget, CLASSEMENTS, SYNTHESE))

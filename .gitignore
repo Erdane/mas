@@ -12,6 +12,7 @@ config.yaml
 
 # Tes relevés et tout ce que mas en tire
 releves/
+fiches_de_paie/
 rapports/
 sortie_anonyme/
 donnees/

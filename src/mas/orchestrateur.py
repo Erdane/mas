@@ -32,6 +32,8 @@ progression = logging.getLogger("mas.progression")
 # n'arriver que le mardi (week-end, jour férié)
 ECART_ENTRE_BANQUES = 5
 LOYER = re.compile(r"\bloyer")
+# Un pseudonyme seul, avec ou sans crochets : « PERSONNE_7 » ou « [PERSONNE_7] »
+PSEUDO_PERSONNE = re.compile(r"\[?(PERSONNE_\d+)\]?")
 PRET_DEBLOQUE = re.compile(r"(?i)(d[ée]blocage|d[ée]caissement).{0,12}(pr[eê]t|cr[ée]dit|fonds)")
 PRELEVEMENT = re.compile(r"(?i)^\s*(prlv|pr[ée]l[èe]vement|prelev)|echpret|[ée]ch[ée]ance pr[eê]t")
 
@@ -196,7 +198,13 @@ class Orchestrateur:
     def __init__(self, config: Config, coffre: Coffre | None = None):
         self.config = config
         self.coffre = coffre if coffre is not None else Coffre(config.coffre.chemin)
-        termes = config.identite.termes()
+        # analyse.epargne_de_proches : des pseudonymes du rapport anonyme, ou des noms, masqués comme les tiens
+        entrees = [e.strip() for e in config.analyse.epargne_de_proches if e.strip()]
+        self.epargne_pseudos = {f"[{m.group(1)}]" for e in entrees if (m := PSEUDO_PERSONNE.fullmatch(e.upper()))}
+        noms = [e for e in entrees if not PSEUDO_PERSONNE.fullmatch(e.upper())]
+        self.epargne_noms = [m for m in (_mots(n) for n in noms) if m]
+        termes = config.identite.termes() + [(v, "PERSON") for n in noms
+                                             for v in dict.fromkeys([n, " ".join(reversed(n.split()))])]
         self.anonymiseur = Anonymiseur(config.anonymisation, self.coffre, termes)
         self.verificateur = Verificateur(config.verification, termes)
         self.liste_blanche = {m.upper() for m in config.anonymisation.liste_blanche}
@@ -218,6 +226,17 @@ class Orchestrateur:
             return False
         mots = _mots(libelle_brut)
         return any(nom <= mots for nom in self.noms_declares)
+
+    def _epargne_d_un_proche(self, libelle: str) -> bool:
+        """Virement avec un proche qui garde son épargne sur ton compte (analyse.epargne_de_proches) :
+        son pseudonyme dans le libellé, ou tous les mots de son nom dans le libellé remis en clair par
+        le coffre, en local."""
+        if any(p in libelle for p in self.epargne_pseudos):
+            return True
+        if not self.epargne_noms:
+            return False
+        mots = _mots(self.coffre.depseudonymiser(libelle))
+        return any(nom <= mots for nom in self.epargne_noms)
 
     def _nom_partiel(self, libelle_brut: str) -> bool:
         """Un mot de ton nom (5 lettres ou plus) dans le libellé en clair, même collé aux autres :
@@ -338,14 +357,16 @@ class Orchestrateur:
         """Compte principal seulement. Met à part l'argent qui ne fait que changer de compte :
         virements vers/depuis les livrets du même relevé (même montant, sens inverse, à 4 jours
         près), entre deux comptes courants relevés à part (voir `_entre_tes_comptes`), vers des
-        comptes déclarés, et vers un bénéficiaire à ton nom (si configuré)."""
+        comptes déclarés, et vers un bénéficiaire à ton nom (si configuré). Avant tout le reste :
+        l'épargne qu'un proche garde sur ton compte (analyse.epargne_de_proches), reçue puis rendue."""
         principales = [(i, o) for i, d in enumerate(documents) for o in d.operations or [] if o.compte == 0]
         # Un livret ne reçoit que de son compte courant : jamais apparié avec le relevé d'une autre banque
         livrets = {i: [o for o in d.operations or [] if o.compte > 0] for i, d in enumerate(documents)}
         a_ton_nom_transfert = self.config.analyse.virements_a_ton_nom == "transfert"
-        types: dict[int, str] = {}          # rang dans `principales` -> type de transfert
+        types: dict[int, str] = {           # rang dans `principales` -> type de transfert
+            k: "epargne_proche" for k, (_, o) in enumerate(principales) if self._epargne_d_un_proche(o.libelle)}
         for k, (i, o) in enumerate(principales):
-            if "vir" in o.libelle.lower():
+            if k not in types and "vir" in o.libelle.lower():
                 pendant = next((e for e in livrets[i] if abs(e.montant + o.montant) < 0.01
                                 and abs((date.fromisoformat(e.date) - date.fromisoformat(o.date)).days) <= 4), None)
                 if pendant is not None:

@@ -11,6 +11,9 @@ from collections import defaultdict
 import dspy
 
 from ..modeles import Classement, GroupeRecurrent, TransactionCategorisee
+from ..aujourdhui import aujourdhui_markdown, budget_aujourdhui
+from ..conseils import pistes_economie, pistes_markdown
+from ..page import epargne_proche_phrase
 from ..recurrence import cle_beneficiaire, cle_libelle
 from .signatures import RedigerSynthese
 
@@ -26,6 +29,7 @@ TRANSFERTS = {
     "tes_comptes": "Tes autres comptes déclarés",
     "a_ton_nom": "Comptes à ton nom (à confirmer)",
     "proches": "Virements avec des proches (mis à part)",
+    "epargne_proche": "Épargne d'un proche gardée sur ton compte (reçue, puis rendue)",
     "exceptionnel": "Achat exceptionnel et son financement (hors moyenne mensuelle)",
 }
 
@@ -252,6 +256,18 @@ def calculer_budget(
     for ligne in par_mois["lignes"]:
         ligne["obligatoire"] = [round(min(oblig_mois[ligne["categorie"]].get(m, 0.0), max(x, 0.0)), 2)
                                 for m, x in zip(liste_mois, ligne["montants"])]
+    # Ce qui a vraiment été payé en charges fixes et en abonnements, en moyenne sur la période : pour la frise
+    # du mois moyen (total_obligatoire, lui, compte chaque charge comme si elle avait couru toute la période)
+    optionnels = par_nature.get("abonnement_optionnel", [])
+    cles_opt = {g.cle for g in optionnels}
+    paiements_opt = {(cle_beneficiaire(g.libelle), d) for g in optionnels for d in g.dates}
+    opt_mois: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        if t.montant < 0 and (cle_libelle(t.libelle) in cles_opt or (cle_beneficiaire(t.libelle), t.date) in paiements_opt):
+            opt_mois[t.categorie][t.date[:7]] += -t.montant
+    oblig_paye = sum(sum(l["obligatoire"]) for l in par_mois["lignes"])
+    opt_paye = sum(min(opt_mois[l["categorie"]].get(m, 0.0), max(x - o, 0.0))
+                   for l in par_mois["lignes"] for m, x, o in zip(liste_mois, l["montants"], l["obligatoire"]))
     # Revenus de chaque mois, pour l'écart revenus − dépenses de la page (jamais envoyés à l'IA)
     revenus_mois: dict[str, float] = defaultdict(float)
     for t in transactions:
@@ -260,16 +276,20 @@ def calculer_budget(
     par_mois["revenus"] = [round(revenus_mois.get(m, 0.0), 2) for m in liste_mois]
 
     total_oblig = sum(g.montant_mensuel for g in par_nature["obligatoire"])
+    par_categorie = {k: v / n for k, v in sorted(depenses_cat.items(), key=lambda x: -x[1])}
+    total_optionnel = sum(g.montant_mensuel for g in par_nature["abonnement_optionnel"])
     return {
         "par_mois": par_mois,
         "nb_mois": n,
         "periode": periode or f"{mois[0]} → {mois[-1]}",
         "revenus_mensuels": revenus / n,
         "depenses_mensuelles": sum(depenses_cat.values()) / n,
-        "par_categorie": {k: v / n for k, v in sorted(depenses_cat.items(), key=lambda x: -x[1])},
+        "par_categorie": par_categorie,
         "par_nature": par_nature,
         "total_obligatoire": total_oblig,
-        "total_optionnel": sum(g.montant_mensuel for g in par_nature["abonnement_optionnel"]),
+        "total_optionnel": total_optionnel,
+        "obligatoire_moyen": oblig_paye / n,
+        "optionnel_moyen": opt_paye / n,
         "reste_apres_obligatoire": revenus / n - total_oblig,
         "transferts": {k: {"sortis": v["sortis"] / n, "rentres": v["rentres"] / n}
                        for k, v in flux.items() if v["sortis"] or v["rentres"]},
@@ -279,6 +299,12 @@ def calculer_budget(
         "recus_proches_en_revenu": en_revenu,
         "a_verifier": a_verifier(transactions, transferts),
         "loyers": loyers or [],
+        # Où économiser sur les dépenses variables : chaque poste comparé à tes propres mois
+        "pistes": pistes_economie(par_mois, revenus / n, par_categorie, total_optionnel),
+        # Les charges fixes à leur montant actuel, le reste sur les douze derniers mois (aujourdhui.py)
+        "aujourdhui": budget_aujourdhui(transactions, par_nature.get("obligatoire", []),
+                                        par_nature.get("abonnement_optionnel", []), par_mois,
+                                        par_nature.get("courant_variable", [])),
     }
 
 
@@ -301,6 +327,8 @@ def resume_markdown(budget: dict, classements: list[Classement]) -> str:
               "| Vers / depuis | Sorti | Rentré |", "|---|---:|---:|"]
         for cle, v in budget["transferts"].items():
             l.append(f"| {TRANSFERTS.get(cle, cle)} | {_eur(v['sortis'])} | {_eur(v['rentres'])} |")
+        if "epargne_proche" in budget["transferts"]:
+            l += ["", epargne_proche_phrase(budget["transferts"]["epargne_proche"], budget["nb_mois"], _eur)]
     if budget.get("proches"):
         p = budget["proches"]
         l += ["", "### Virements avec des proches (moyenne mensuelle)", "",
@@ -323,6 +351,8 @@ def resume_markdown(budget: dict, classements: list[Classement]) -> str:
             l.append(f"| {len(reste)} autres personnes | {sum(d['virements'] for d in reste)} | "
                      f"{_eur(sum(d['envoye'] for d in reste))} | {_eur(sum(d['recu'] for d in reste))} | "
                      f"{_eur(sum(d['depense'] for d in reste)) if compte else '—'} | | |")
+    l += aujourdhui_markdown(budget.get("aujourdhui"), budget["depenses_mensuelles"], _eur)
+    l += pistes_markdown(budget.get("pistes"), _eur)
     if budget.get("a_verifier"):
         l += ["", "### À vérifier", "", "Opérations que mas n'a pas pu classer avec certitude.", "",
               "| Date | Libellé | Montant | Pourquoi |", "|---|---|---:|---|"]

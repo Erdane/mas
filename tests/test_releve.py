@@ -15,13 +15,13 @@ def releve_bred(tmp_path_factory):
     return ecrire_releve_bred(tmp_path_factory.mktemp("bred") / "releve_bred.pdf")
 
 
-def _orchestrateur(config, **analyse):
+def _orchestrateur(config, coffre=None, **analyse):
     cfg = config.model_copy(deep=True)
     cfg.identite.noms = ["Jean Dupont"]
     cfg.identite.adresses = []
     for cle, valeur in analyse.items():
         setattr(cfg.analyse, cle, valeur)
-    return Orchestrateur(cfg, Coffre(None))
+    return Orchestrateur(cfg, coffre if coffre is not None else Coffre(None))
 
 
 def test_releves_de_test_lus_a_l_identique(releves):
@@ -214,3 +214,46 @@ def test_loyer_avec_ton_nom_en_reference(config):
     orch = _orchestrateur(config)
     assert orch._a_ton_nom("Virement instantané émis a1b2c3d residence les acacias loyer JEAN DUPONT") is False
     assert orch._a_ton_nom("Virement SEPA émis 7000003 JEAN DUPONT") is True
+
+
+def test_epargne_d_un_proche_mise_a_part_par_pseudonyme(config):
+    """Un proche garde son épargne sur ton compte : ce qu'il envoie et ce que tu lui rends n'est ni un
+    revenu ni une dépense. Désigné par son pseudonyme, avec ou sans crochets ; [PERSONNE_77] n'est pas lui."""
+    orch = _orchestrateur(config, epargne_de_proches=["PERSONNE_7", "[personne_9]"],
+                          achat_exceptionnel_min=3000.0)
+    releve = _releve([("2026-03-02", "VIR INST RECU DE [PERSONNE_7]", 200.0),
+                      ("2026-03-06", "VIR INST A [PERSONNE_7] RETOUR", -200.0),
+                      ("2026-03-09", "VIREMENT RECU [PERSONNE_9]", 3500.0),       # pas un achat exceptionnel
+                      ("2026-03-20", "VIREMENT EMIS [PERSONNE_9]", -3500.0),
+                      ("2026-03-21", "VIR INST A [PERSONNE_77] RESTO", -30.0),
+                      ("2026-03-22", "CARTE MONOPRIX", -40.0)], MARS)
+    transactions, transferts, _ = orch.separer_transferts([releve])
+    assert sorted((t["type"], t["montant"]) for t in transferts) == [
+        ("epargne_proche", -3500.0), ("epargne_proche", -200.0), ("epargne_proche", 200.0), ("epargne_proche", 3500.0)]
+    assert sorted(t.montant for t in transactions) == [-40.0, -30.0]
+
+
+def test_epargne_d_un_proche_designe_par_son_nom(config):
+    """Désigné par son nom : tous ses mots, dans n'importe quel ordre, dans le libellé remis en clair par le
+    coffre. Une personne qui porte seulement le même nom de famille n'est pas concernée, et le nom déclaré
+    est masqué comme les tiens."""
+    coffre = Coffre(None)
+    camille = coffre.pseudonyme("PERSON", "MARTIN Camille")
+    lucas = coffre.pseudonyme("PERSON", "Lucas Martin")
+    orch = _orchestrateur(config, coffre, epargne_de_proches=["Camille Martin"])
+    releve = _releve([("2026-03-02", f"VIR SEPA RECU DE MME {camille}", 150.0),
+                      ("2026-03-09", f"VIR INST A {camille}", -150.0),
+                      ("2026-03-12", f"VIR INST A {lucas}", -60.0)], MARS)
+    transactions, transferts, _ = orch.separer_transferts([releve])
+    assert sorted(t["montant"] for t in transferts if t["type"] == "epargne_proche") == [-150.0, 150.0]
+    assert [t.montant for t in transactions] == [-60.0]
+    assert ("Camille Martin", "PERSON") in orch.anonymiseur.termes_personnels
+    assert ("Martin Camille", "PERSON") in orch.verificateur.termes
+
+
+def test_sans_epargne_de_proches_rien_ne_change(config):
+    orch = _orchestrateur(config)
+    releve = _releve([("2026-03-02", "VIR INST RECU DE [PERSONNE_7]", 200.0),
+                      ("2026-03-06", "VIR INST A [PERSONNE_7] RETOUR", -200.0)], MARS)
+    transactions, transferts, _ = orch.separer_transferts([releve])
+    assert transferts == [] and len(transactions) == 2

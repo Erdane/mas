@@ -46,16 +46,17 @@ construire un budget.
 2. [Configuration](#configuration)
 3. [Analyser tes relevés, pas à pas](#analyser-tes-relevés-pas-à-pas)
 4. [Comment mas lit tes relevés](#comment-mas-lit-tes-relevés) et [ce qui compte comme dépense](#ce-qui-compte-comme-dépense)
-5. [Les deux boucles de mas](#les-deux-boucles-de-mas)
-6. [Essayer sans tes données](#essayer-sans-tes-données)
-7. [Publier le code sans tes données](#publier-le-code-sans-tes-données)
-8. [Commandes](#commandes)
-9. [Optimisation avec GEPA](#optimisation-avec-gepa)
-10. [Tests](#tests-sans-clé-api)
-11. [Structure](#structure)
-12. [Ta banque n'est pas reconnue ?](#ta-banque-nest-pas-reconnue-)
-13. [Limites](#limites)
-14. [Licence](#licence)
+5. [Tes fiches de paie](#tes-fiches-de-paie)
+6. [Les deux boucles de mas](#les-deux-boucles-de-mas)
+7. [Essayer sans tes données](#essayer-sans-tes-données)
+8. [Publier le code sans tes données](#publier-le-code-sans-tes-données)
+9. [Commandes](#commandes)
+10. [Optimisation avec GEPA](#optimisation-avec-gepa)
+11. [Tests](#tests-sans-clé-api)
+12. [Structure](#structure)
+13. [Ta banque n'est pas reconnue ?](#ta-banque-nest-pas-reconnue-)
+14. [Limites](#limites)
+15. [Licence](#licence)
 
 ## Installation
 
@@ -96,7 +97,7 @@ prioritaire. Il est ignoré par git, comme `config.yaml`.
 | Section | Rôle |
 |---|---|
 | `llm` | modèle d'analyse, au format LiteLLM `fournisseur/modele`. `anthropic/claude-haiku-4-5-20251001` est économique (1 $ / 5 $ par million de tokens en entrée / sortie) ; `anthropic/claude-sonnet-5-5` est plus fin et coûte le double (2 $ / 10 $) ; `anthropic/claude-opus-5-5` est le plus fin des trois et coûte quatre fois Haiku (4 $ / 20 $). Pour Sonnet et Opus 5.5 : **`temperature: null` et `max_tokens: 16000`**, car ils refusent la température et leur réflexion avant de répondre compte dans `max_tokens` |
-| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`), loyers payés sans le mot « loyer » (`loyers_sans_libelle`, `loyer_montant_min`), achats exceptionnels (`achat_exceptionnel_min`), argent reçu de proches (`recus_de_proches`), catégories que tu imposes (`categories`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
+| `analyse` | ce qui compte comme dépense : virements vers un bénéficiaire à ton nom (`virements_a_ton_nom`), tes comptes dans d'autres banques (`comptes_personnels`), virements à des proches (`virements_a_des_proches`), loyers payés sans le mot « loyer » (`loyers_sans_libelle`, `loyer_montant_min`), achats exceptionnels (`achat_exceptionnel_min`), argent reçu de proches (`recus_de_proches`), épargne qu'un proche garde sur ton compte (`epargne_de_proches`), catégories que tu imposes (`categories`) ; voir [Ce qui compte comme dépense](#ce-qui-compte-comme-dépense) |
 | `identite` | tes données qui ne doivent jamais sortir : noms (toutes les variantes écrites sur tes relevés), adresses, IBAN, numéros de compte, téléphones, e-mails, et `autres` (n° client, n° de contrat, proches à qui tu fais des virements…) |
 | `anonymisation` | modèle spaCy, types d'entités masquées, `liste_blanche` des marchands à ne pas masquer |
 | `verification` | nombre maximal de boucles anonymisation → vérification (voir [Les deux boucles de mas](#les-deux-boucles-de-mas)), vérificateur LLM local optionnel (Ollama) |
@@ -215,9 +216,16 @@ dans `rapports/`, que git ignore. Une analyse sans IA ajoute `_no-ai` au nom.
 
 La page du rapport montre :
 
-- **ton mois type :** une barre représente tes revenus ; les parties colorées sont tes dépenses
+- **ton mois moyen :** une barre représente tes revenus ; les parties colorées sont tes dépenses
   (obligatoires, abonnements optionnels, courantes), la partie vide est ce qu'il te reste, avec ce
-  montant en grand ;
+  montant en grand. C'est la moyenne de toute la période, écrite sous la barre ;
+- **ton budget aujourd'hui :** la même barre pour les mois qui viennent, si rien ne change. Tes dépenses
+  régulières (charges fixes, abonnements, mensualités) y comptent pour leur montant actuel : une
+  mensualité commencée il y a quatre mois y pèse en entier, un abonnement arrêté n'y est plus ; une
+  charge espacée (annuelle, impôt en plusieurs fois) pour ce qui a été payé sur douze mois. Le reste,
+  et les revenus, en moyenne des douze derniers mois complets. Ce qui a changé est listé dessous. Elle
+  n'apparaît que si elle s'écarte de la moyenne (50 € et 3 % au moins), et « Où économiser » mesure
+  alors le manque d'après elle ;
 - **ce que dit l'analyse :** le constat et les pistes d'économies rédigés par l'IA ;
 - **où va ton argent :** tes dépenses mensuelles par catégorie, avec le tableau des montants exacts.
   Touche une catégorie : la page de détail s'ouvre sur elle, tous ses mois dépliés, chaque opération
@@ -303,6 +311,7 @@ barre des revenus (« Pas compté dans tes dépenses ») et dans le rapport text
 | vers tes autres comptes | le libellé mentionne un compte que tu as déclaré (IBAN, code BIC, banque, ou ton nom tel qu'il apparaît : « J DUPONT ») | `analyse.comptes_personnels` |
 | vers un compte à ton nom | le bénéficiaire porte le nom déclaré dans `identite.noms` | `analyse.virements_a_ton_nom` |
 | avec des proches | catégorie « virements à des proches » | `analyse.virements_a_des_proches` |
+| épargne d'un proche gardée sur ton compte | il t'envoie de l'argent, tu le lui rends plus tard : son pseudonyme, ou tous les mots de son nom, dans le libellé. La page dit ce que tu as reçu, rendu, et ce qui est encore chez toi | `analyse.epargne_de_proches` |
 | achat exceptionnel et son prêt | des paiements à un même bénéficiaire en 7 jours qui font au moins 3 000 € (prélèvements exceptés), et un prêt débloqué ; les mensualités du prêt, elles, comptent chaque mois | `analyse.achat_exceptionnel_min` |
 
 Le repérage « à ton nom » est une **déduction**, pas une certitude : un homonyme, un proche qui
@@ -338,6 +347,46 @@ Le reste du calcul :
 - **mois par mois :** les mêmes règles, appliquées à chaque mois. Un mois couvert à moins de 75 %
   par tes relevés (par exemple du 1er au 5) est marqué incomplet ; la somme des mois, divisée par le
   nombre de mois couverts, redonne les moyennes (au centime près).
+
+## Tes fiches de paie
+
+Dépose tes bulletins de paie PDF dans `fiches_de_paie/` (le dossier `paie.dossier` de `config.yaml`, ignoré par
+git), puis :
+
+```bash
+mas payslips                 # tes bulletins, croisés avec ton dernier rapport de budget
+mas payslips --alone         # la page des bulletins seule
+```
+
+`mas analyser` le fait aussi tout seul quand le dossier contient des bulletins. Un rapport a alors trois pages,
+reliées par un menu commun :
+
+| Page | Ce qu'elle montre |
+|---|---|
+| `rapport_X.html` : **Ton budget** | la page de toujours (dépenses, catégories, récurrences, où économiser…) |
+| `rapport_X_paie.html` : **Tes fiches de paie** | ton pouvoir d'achat (indice des prix de l'INSEE), le calendrier de tes primes, le net d'un mois sans prime, ce que prennent cotisations et impôt (et les changements de taux), chaque augmentation et son rappel, les règles de ta paie vérifiées mois par mois (primes en pourcentage du salaire de base, 13e mois), ce que ton employeur t'a annoncé, les mois qui viennent, ton compte épargne temps |
+| `rapport_X_croise.html` : **Salaire et budget** | ce que ton salaire laisse après tes dépenses mois par mois, mois ordinaires contre mois de prime, le net de chaque bulletin contre le virement reçu, salaire et dépenses d'une année sur l'autre (sur les mêmes mois), les douze mois qui viennent |
+
+**Anonymisés avant d'être lus.** Chaque bulletin passe par le même anonymiseur que tes relevés, avec le même coffre :
+le texte est lu mot par mot avec sa position, chaque mot repéré prend son pseudonyme sans bouger de place, puis le
+vérificateur cherche ce qui resterait (ton identité déclarée, un numéro de sécurité sociale, un IBAN…) et bloque la
+lecture si une fuite résiste. Sur une ligne de paie, les noms que spaCy devinerait dans un libellé (« PRIME
+D'ASSIDUITE ») sont ignorés ; ton identité déclarée et les numéros restent masqués partout. Rien n'est envoyé à l'IA :
+tout se calcule sur ton PC, et seul l'indice des prix est téléchargé (le même pour tout le monde).
+
+**Lecture.** Le bulletin est un tableau : base, taux, retenue, gain, part employeur. Le texte seul ne dit pas dans
+quelle colonne tombe un montant : mas lit la position de chaque mot, et calibre les colonnes sur le bulletin lui-même
+(le salaire de base dans les gains, le total des cotisations dans les retenues, la ligne d'impôt). À défaut,
+`paie.colonnes` les règle. Un libellé mal rangé se corrige dans `paie.natures` (un mot du libellé, puis sa nature).
+
+**Un classeur en complément.** `paie.classeur` : un classeur Excel avec une feuille « Brut AAAA » (une colonne par
+ligne de paie, puis « Cotisations ») et une feuille « Net AAAA » (net avant et après impôt) par année. Il sert pour les
+mois sans PDF ; là où les deux existent, le PDF fait foi et mas signale ce que le classeur dit autrement (un signe
+inversé, une ligne oubliée) et ce que ses formules calculent de travers.
+
+**Ce qu'on t'a annoncé.** `paie.annonces` : une augmentation, un salaire de base, une prime, une rémunération annuelle
+(modèle dans `config.example.yaml`). mas les compare aux bulletins ; une hausse annoncée en janvier mais versée en
+avril avec trois mois de rappel est conforme.
 
 ## Les deux boucles de mas
 
@@ -456,6 +505,7 @@ inventé pour un test qui se trouve aussi dans ton coffre), change le nom dans l
 | `mas anonymiser ENTRÉE` | anonymise seulement, rien n'est envoyé | `--sortie DOSSIER` |
 | `mas analyser ENTRÉE` | anonymise, vérifie, analyse, écrit un rapport daté dans `rapports/` et l'ouvre | `--no-ai`, `--no-open`, `--sortie FICHIER.md`, `--oui` |
 | `mas exporter RAPPORT.md` | régénère les pages HTML d'un rapport existant, sans rappeler l'IA (à partir de `rapport.json` ; sans lui, simple mise en page du Markdown) | `-c` |
+| `mas payslips` | tes fiches de paie (`fiches_de_paie/`, et un classeur en complément), anonymisées puis lues sans IA : leur page, et celle qui les croise avec ton dernier rapport de budget | `--budget RAPPORT.json`, `--alone`, `--refresh-prices`, `--no-open` |
 | `mas coffre` | table pseudonymes → vraies valeurs (local) | |
 | `mas generer` | relevés synthétiques (PDF + vérité JSON) | `--n`, `--sortie`, `--graine` |
 | `mas optimiser` | optimise les agents avec GEPA | `--regenerer` |
@@ -542,6 +592,20 @@ src/mas/
   orchestrateur.py      enchaîne tout, bloque l'envoi en cas de fuite
   page.py               page HTML du rapport (barre des revenus, catégories, écart revenus/dépenses, mois par
                         mois, récurrences) et sa page de détail par catégorie et par mois
+  navigation.py         le menu commun aux pages d'un rapport (budget, fiches de paie, salaire et budget)
+  paie/                 tes fiches de paie, sans IA
+    pdf.py              lecture d'un bulletin d'après la position des mots, colonnes calibrées sur le bulletin
+    anonymisation.py    anonymisation mot par mot, sans bouger les positions, puis vérification
+    excel.py            classeur « Brut AAAA » / « Net AAAA », et ses formules qui calculent de travers
+    natures.py          la nature de chaque ligne (salaire de base, prime du mois, 13e mois, variable, frais…)
+    analyses.py         augmentations, règles de paie, 13e mois, calendrier, impôts, pouvoir d'achat, CET
+    controles.py        classeur contre bulletins ; lignes qui ne retombent pas sur le net
+    annonces.py         ce que l'employeur a annoncé, contre les bulletins
+    prevision.py        les mois qui viennent
+    inflation.py        l'indice des prix de l'INSEE (gardé une semaine dans ~/.mas/ipc.json)
+    page.py, croise.py  la page des bulletins ; celle qui les croise avec le budget
+    rapprochement.py    le net de chaque bulletin contre le virement reçu
+    export.py, sortie.py  les données en JSON ; l'écriture et le lien des pages
   export.py             mise en page simple d'un rapport Markdown (anciens rapports)
   suivi.py              durées, tokens et coût estimé d'une analyse
   sans_ia.py            mas analyser --no-ai : catégories par mots-clés, constats calculés

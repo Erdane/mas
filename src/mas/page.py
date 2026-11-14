@@ -22,6 +22,9 @@ from pathlib import Path
 
 from markdown_it import MarkdownIt
 
+from .aujourdhui import a_montrer, phrase_changement
+from .conseils import pistes_economie
+
 VERSION_DONNEES = 1
 
 # HTML brut désactivé : le texte vient d'un LLM et les libellés d'un relevé bancaire
@@ -96,6 +99,9 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         for nature, groupes in budget.get("par_nature", {}).items()
         for g in groupes
     ]
+    ops = [{"date": o["date"], "libelle": o["libelle"], "montant": round(o["montant"], 2),
+            "categorie": o.get("categorie", "autre")}
+           for o in sorted((o if isinstance(o, dict) else o.model_dump() for o in operations or []), key=lambda o: o["date"])]
     return {
         "version": VERSION_DONNEES,
         "genere_le": (genere_le or datetime.now()).isoformat(timespec="minutes"),
@@ -104,6 +110,9 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "depenses": round(budget.get("depenses_mensuelles", 0.0), 2),
         "obligatoire": round(budget.get("total_obligatoire", 0.0), 2),
         "optionnel": round(budget.get("total_optionnel", 0.0), 2),
+        # Payés en moyenne sur la période (la frise du mois moyen) ; absents des anciens rapport.json
+        **({"obligatoire_moyen": round(budget["obligatoire_moyen"], 2), "optionnel_moyen": round(budget["optionnel_moyen"], 2)}
+           if "obligatoire_moyen" in budget else {}),
         "categories": [{"categorie": k, "montant": round(v, 2)}
                        for k, v in budget.get("par_categorie", {}).items()],
         "recurrents": recurrents,
@@ -115,6 +124,8 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "recus_proches_en_revenu": bool(budget.get("recus_proches_en_revenu")),
         "a_verifier": budget.get("a_verifier") or [],
         "loyers": budget.get("loyers") or [],
+        "pistes": budget.get("pistes"),     # où économiser (conseils.py), calcul local
+        "aujourdhui": budget.get("aujourdhui"),     # budget d'aujourd'hui (aujourdhui.py), calcul local
         "synthese": synthese,
         "alertes_extraction": nb_alertes,
         "controles": messages,
@@ -122,10 +133,7 @@ def donnees_rapport(budget: dict, classements, synthese: str, alertes: int | lis
         "lectures": lectures or [],       # comment chaque relevé a été lu (voir Orchestrateur.lectures)
         "livrets": livrets or [],         # bilan de chaque livret (voir orchestrateur.bilan_livrets)
         # Chaque opération classée, libellé pseudonymisé : pour la page de détail (catégorie, puis mois)
-        "operations": [{"date": o["date"], "libelle": o["libelle"], "montant": round(o["montant"], 2),
-                        "categorie": o.get("categorie", "autre")}
-                       for o in sorted((o if isinstance(o, dict) else o.model_dump() for o in operations or []),
-                                       key=lambda o: o["date"])],
+        "operations": ops,
     }
 
 
@@ -140,7 +148,8 @@ def _pct(part: float, total: float) -> str:
     return f"{round(100 * part / total)} %" if total else "—"
 
 
-def _periode_lisible(periode: dict) -> str:
+def _periode_courte(periode: dict) -> str:
+    """« de mars 2025 à octobre 2026 », « de mars à octobre 2026 », « en mars 2026 », ou "" si on ne sait pas."""
     def mois(aaaa_mm: str) -> tuple[str, str] | None:
         try:
             annee, m = aaaa_mm.split("-")
@@ -150,13 +159,19 @@ def _periode_lisible(periode: dict) -> str:
 
     debut, fin = mois(periode.get("debut", "")), mois(periode.get("fin", ""))
     if not debut or not fin:
-        return "Période non déterminée"
+        return ""
     if debut == fin:
-        texte = f"En {debut[0]} {debut[1]}"
-    elif debut[1] == fin[1]:
-        texte = f"De {debut[0]} à {fin[0]} {fin[1]}"
-    else:
-        texte = f"De {debut[0]} {debut[1]} à {fin[0]} {fin[1]}"
+        return f"en {debut[0]} {debut[1]}"
+    if debut[1] == fin[1]:
+        return f"de {debut[0]} à {fin[0]} {fin[1]}"
+    return f"de {debut[0]} {debut[1]} à {fin[0]} {fin[1]}"
+
+
+def _periode_lisible(periode: dict) -> str:
+    texte = _periode_courte(periode)
+    if not texte:
+        return "Période non déterminée"
+    texte = texte[0].upper() + texte[1:]
     n = periode.get("nb_mois", 0)
     if not n:
         return texte
@@ -266,12 +281,26 @@ def _alerte(d: dict) -> str:
             "avant de t'y fier.</span></p>")
 
 
+def epargne_proche_phrase(flux: dict[str, float], nb_mois: float, eur=None) -> str:
+    """Ce qu'un proche a laissé sur ton compte et ce que tu lui as rendu, sur toute la période
+    (`flux` : moyennes mensuelles, comme dans budget["transferts"])."""
+    eur = eur or _eur
+    recu, rendu = flux["rentres"] * nb_mois, flux["sortis"] * nb_mois
+    phrase = f"Épargne gardée pour un proche : {eur(recu)} reçus et {eur(rendu)} rendus sur la période"
+    if recu - rendu >= 1:
+        phrase += f", soit {eur(recu - rendu)} encore chez toi (ou rendus autrement)"
+    elif rendu - recu >= 1:
+        phrase += f", soit {eur(rendu - recu)} rendus en plus (reçus avant la période ?)"
+    return phrase + "."
+
+
 TRANSFERTS = {
     "epargne": "vers ton épargne (livrets, LDD…)",
     "entre_tes_comptes": "entre tes comptes de deux relevés (débité sur l'un, crédité sur l'autre)",
     "tes_comptes": "vers tes autres comptes déclarés",
     "a_ton_nom": "vers des comptes à ton nom",
     "proches": "en virements avec des proches",
+    "epargne_proche": "rendus à un proche qui garde son épargne sur ton compte",
     "exceptionnel": "pour un achat exceptionnel et son financement (hors moyenne mensuelle)",
 }
 
@@ -294,6 +323,12 @@ def _hors_depenses(d: dict) -> str:
                 "config.yaml. Si ce n'est pas toi (homonyme, proche), mets "
                 "<code>virements_a_ton_nom: depense</code> dans la section <code>analyse</code> pour les "
                 "compter comme des dépenses.</p>")
+    if "epargne_proche" in t:
+        nb_mois = (d.get("periode") or {}).get("nb_mois") or 1
+        note += ('<p class="hors-note">' + html.escape(epargne_proche_phrase(t["epargne_proche"], nb_mois,
+                                                                        lambda x: _eur(x, 0)))
+                 + " Les proches concernés sont dans <code>epargne_de_proches</code>, section "
+                 "<code>analyse</code> de ton config.yaml.</p>")
     return ('<div class="hors-depenses"><p class="hors-titre">Pas compté dans tes dépenses : de l\'argent '
             f"qui change seulement de compte</p><ul>{items}</ul>{note}</div>")
 
@@ -304,9 +339,14 @@ def _segment(classe: str, part: float, valeur: str, libelle: str, detail: str) -
             "</span>")
 
 
-def _recap(d: dict) -> str:
-    revenus, depenses = d["revenus"], d["depenses"]
-    oblig, opt = d["obligatoire"], d["optionnel"]
+def _recap(d: dict, aujourdhui: dict | None = None) -> str:
+    """La frise du mois : la moyenne de toute la période, ou, avec `aujourdhui`, le budget d'aujourd'hui."""
+    src = aujourdhui or d
+    revenus, depenses = src["revenus"], src["depenses"]
+    if aujourdhui:
+        oblig, opt = src["obligatoire"], src["optionnel"]
+    else:
+        oblig, opt = d.get("obligatoire_moyen", d["obligatoire"]), d.get("optionnel_moyen", d["optionnel"])
     courantes = max(0.0, depenses - oblig - opt)
     reste = revenus - depenses
     echelle = max(revenus, depenses) or 1.0
@@ -351,16 +391,53 @@ def _recap(d: dict) -> str:
     if reste > 0:
         items += (f'<li><span class="pastille piste" aria-hidden="true"></span>Reste <strong>{_eur(reste, 0)}</strong>'
                   f'<span class="part">{_pct(reste, revenus)}</span></li>')
-    base = (f'<p class="base">Moyennes mensuelles, sur {_eur(revenus, 0)} de revenus par mois.</p>' if revenus
-            else '<p class="base">Aucun revenu détecté dans ces relevés : la barre montre seulement les dépenses.</p>')
+    if aujourdhui:
+        quand = _periode_courte(aujourdhui["fenetre"])
+        base = (f'<p class="base">Dépenses régulières à leur montant actuel ; le reste en moyenne {quand}, '
+                f"sur {_eur(revenus, 0)} de revenus par mois.</p>")
+        ident, titre, phrase, hors = "t-recap-aujourdhui", "Ton mois d'aujourd'hui", "Aujourd'hui, tu dépenses", ""
+    else:
+        # Une moyenne de toute la période : la frise le dit, pour ne pas la confondre avec le mois en cours
+        quand = _periode_courte(d.get("periode") or {})
+        base = (f'<p class="base">Moyennes mensuelles{" " + quand if quand else ""}, sur {_eur(revenus, 0)} de revenus par mois.</p>'
+                if revenus else '<p class="base">Aucun revenu détecté dans ces relevés : la barre montre seulement les dépenses.</p>')
+        ident, titre, phrase, hors = "t-recap", "Ton mois moyen", "En moyenne, tu dépenses", _hors_depenses(d)
     return (
-        '<section class="recap" aria-labelledby="t-recap">'
-        '<h2 id="t-recap" class="visuellement-cache">Ton mois type</h2>'
+        f'<section class="recap" aria-labelledby="{ident}">'
+        f'<h2 id="{ident}" class="visuellement-cache">{html.escape(titre, quote=False)}</h2>'
         '<div class="recap-haut">'
-        f'<p class="depense">Tu dépenses <strong>{_eur(depenses, 0)}</strong> par mois</p>{droite}</div>'
+        f'<p class="depense">{html.escape(phrase, quote=False)} <strong>{_eur(depenses, 0)}</strong> par mois</p>{droite}</div>'
         f'<div class="barre" role="img" aria-label="{_attr(resume_barre)}">{"".join(segments)}{repere}</div>'
-        f'<ul class="legende">{items}</ul>{base}{_hors_depenses(d)}</section>'
+        f'<ul class="legende">{items}</ul>{base}{hors}</section>'
     )
+
+
+def _aujourdhui_affiche(d: dict) -> dict | None:
+    """Le budget d'aujourd'hui, s'il dit autre chose que la moyenne (aujourdhui.a_montrer)."""
+    a = d.get("aujourdhui")
+    return a if a_montrer(a, d.get("depenses", 0.0)) else None
+
+
+def _aujourdhui(d: dict, valeurs: dict[str, str] | None) -> str:
+    """Ton budget aujourd'hui : la moyenne décrit le passé ; ici, les charges fixes à leur montant actuel."""
+    a = _aujourdhui_affiche(d)
+    if not a:
+        return ""
+    quand = _periode_courte(a["fenetre"])
+    intro = ("La frise du dessus est une moyenne de toute la période : ce qui a changé récemment n'y pèse "
+             "qu'un peu. Ici, tes dépenses régulières (charges fixes, abonnements, mensualités) sont comptées à "
+             f"leur montant actuel, et le reste en moyenne {quand}. C'est ce que coûteront les mois qui viennent, "
+             "si rien ne change.")
+    changements = ""
+    if a.get("changements"):
+        items = "".join(f"<li>{phrase_changement(c, lambda x: _eur(x, 0), _texte(c['libelle'], valeurs))}</li>"
+                        for c in a["changements"])
+        changements = (f'<p class="hors-titre">Ce qui a changé dans tes dépenses régulières</p>'
+                       f'<ul class="changements">{items}</ul>')
+    return ('<section class="aujourdhui" aria-labelledby="t-aujourdhui">'
+            '<h2 id="t-aujourdhui">Ton budget aujourd\'hui</h2>'
+            f'<p class="intro">{html.escape(intro, quote=False)}</p>'
+            f"{_recap(d, a)}{changements}</section>")
 
 
 def _notes_categories(d: dict, valeurs: dict[str, str] | None) -> str:
@@ -820,6 +897,108 @@ def _ecart(d: dict) -> str:
     )
 
 
+def _pistes_de(d: dict) -> dict | None:
+    """Les pistes du rapport, ou recalculées pour un rapport écrit avant elles."""
+    if "pistes" in d:
+        return d["pistes"]
+    return pistes_economie(d.get("par_mois") or {}, d.get("revenus", 0.0),
+                           {c["categorie"]: c["montant"] for c in d.get("categories") or []}, d.get("optionnel", 0.0))
+
+
+def _dessin_mois(serie: list[dict], objectif: float, nom: str) -> str:
+    """Petites barres, une par mois, et l'objectif en pointillé : les mois au-dessus ressortent."""
+    largeur, hauteur, haut = 300, 64, 4
+    maxi = max([s["montant"] for s in serie] + [objectif]) or 1.0
+    pas_x = largeur / len(serie)
+    barre = max(pas_x - 2, 1.0)
+    echelle = (hauteur - haut) / maxi
+    els = []
+    for i, s in enumerate(serie):
+        h = max(s["montant"] * echelle, 1.0)
+        mois = MOIS[int(s["mois"][5:]) - 1] + " " + s["mois"][:4]
+        els.append(f'<rect class="{"au-dessus" if s["montant"] > objectif else "en-dessous"}" x="{i * pas_x + 1:.1f}" '
+                   f'y="{hauteur - h:.1f}" width="{barre:.1f}" height="{h:.1f}" rx="1.5" '
+                   f'data-valeur="{_attr(_eur(s["montant"], 0))}" data-libelle="{_attr(mois)}" '
+                   f'data-detail="{_attr("objectif " + _eur(objectif, 0))}"/>')
+    y = hauteur - objectif * echelle
+    els.append(f'<line class="objectif" x1="0" x2="{largeur}" y1="{y:.1f}" y2="{y:.1f}"/>')
+    au_dessus = sum(1 for s in serie if s["montant"] > objectif)
+    titre = f"{nom} : {au_dessus} mois sur {len(serie)} au-dessus de l'objectif de {_eur(objectif, 0)}"
+    return (f'<svg class="pi-mois" viewBox="0 0 {largeur} {hauteur}" role="img" aria-label="{_attr(titre)}" '
+            f'preserveAspectRatio="none">{"".join(els)}</svg>')
+
+
+def _pistes(d: dict, page_detail: str | None = None) -> str:
+    """Où économiser : les postes variables comparés à tes propres mois, et la règle 50/30/20 comme repère."""
+    p = _pistes_de(d)
+    if not p or not (p.get("pistes") or p.get("repartition")):
+        return ""
+    pc = lambda x: f"{x * 100:.0f}\u00a0%".replace("-", "−")
+    morceaux = []
+    if p["pistes"]:
+        total = p["total"]
+        abonnements = (f"<span>Et {_eur(p['abonnements_optionnels'], 0)} par mois d'abonnements optionnels, "
+                       "détaillés plus bas.</span>" if p.get("abonnements_optionnels") else "")
+        a = _aujourdhui_affiche(d)
+        base = a or d
+        manque = base.get("depenses", 0.0) - base.get("revenus", 0.0)
+        couverture = ""
+        if manque >= 1 and base.get("revenus"):
+            couverture = (f"<span>Tes dépenses dépassent tes revenus de {_eur(manque, 0)} par mois "
+                          + ("aujourd'hui" if a else "en moyenne") + " : "
+                          + ("ces pistes couvriraient ce manque." if total >= manque else
+                             f"ces pistes en couvriraient {pc(total / manque)}.") + "</span>")
+        morceaux.append(f'<p class="pi-total"><strong>{_eur(total, 0)}</strong><span>par mois en suivant ces pistes, '
+                        f"soit {_eur(12 * total, 0)} par an.</span>{couverture}{abonnements}</p>")
+    r = p.get("repartition")
+    if r:
+        reperes = p.get("reperes") or {}
+        tuiles = []
+        for cle, nom, contenu in [
+            ("besoins", "Besoins", "logement, courses, transport, assurances, impôts, crédits"),
+            ("envies", "Envies", "restaurants, shopping, loisirs et vacances, abonnements"),
+            ("autres", "Proches, espèces et divers", "ni besoin ni envie d'office : à toi de les ranger"),
+            ("epargne", "Épargne", "ce qui reste de tes revenus une fois tout payé"),
+        ]:
+            part, repere = r[cle]["part"], reperes.get(cle)
+            ecart = repere is not None and ((part < repere) if cle == "epargne" else (part > repere))
+            jauge = (f'<span class="pi-jauge" aria-hidden="true"><span class="{"hors" if ecart else "dans"}" '
+                     f'style="width:{min(max(part, 0.0), 1.0) * 100:.1f}%"></span>'
+                     + (f'<i style="left:{repere * 100:.0f}%"></i>' if repere is not None else "") + "</span>")
+            tuiles.append(
+                f'<li class="{"hors" if ecart else ""}"><span class="pi-quoi">{nom}</span>'
+                f'<strong>{pc(part)}</strong><span class="pi-rep">'
+                + (f"repère {pc(repere)}" if repere is not None else "sans repère") + f"</span>{jauge}"
+                f'<span class="pi-contenu">{_eur(r[cle]["montant"], 0)} par mois : {contenu}</span></li>')
+        morceaux.append('<h3>La règle 50/30/20</h3><p class="note">Un repère courant : la moitié des revenus pour '
+                        "les besoins, 30\u00a0% pour les envies, 20\u00a0% mis de côté.</p>"
+                        f'<ul class="pi-regle">{"".join(tuiles)}</ul>')
+    if p["pistes"]:
+        cartes = []
+        for x in p["pistes"]:
+            nom = CATEGORIES.get(x["categorie"], x["categorie"].replace("_", " ").capitalize())
+            part = f" ({pc(x['part_revenus'])} de tes revenus)" if x.get("part_revenus") else ""
+            chers = " et ".join(f"{MOIS[int(c['mois'][5:]) - 1]} {c['mois'][:4]} ({_eur(c['montant'], 0)})"
+                                for c in x["plus_chers"])
+            cartes.append(
+                f'<article class="piste"><h3>{_lien(page_detail, html.escape(nom), x["categorie"])}</h3>'
+                f'<p class="pi-gain"><strong>−{_eur(x["economie"], 0)}</strong><span>par mois, '
+                f"{_eur(12 * x['economie'], 0)} par an</span></p>"
+                f'<p class="pi-chiffres">{_eur(x["moyenne"], 0)} par mois en moyenne{part}. Un mois sur quatre, '
+                f"moins de {_eur(x['sobres'], 0)}. Objectif : <strong>{_eur(x['objectif'], 0)}</strong> par mois.</p>"
+                + _dessin_mois(x["serie"], x["objectif"], nom)
+                + f'<p class="pi-chers">Tes mois les plus chers : {chers}.</p>'
+                f'<p class="pi-conseil">{html.escape(x["conseil"])}</p></article>')
+        morceaux.append('<h3>Poste par poste</h3><ul class="legende"><li><span class="pastille au-dessus" '
+                        'aria-hidden="true"></span>Mois au-dessus de l\'objectif</li><li><span class="pastille '
+                        'en-dessous" aria-hidden="true"></span>Mois sous l\'objectif</li><li><span class="trait-objectif" '
+                        f'aria-hidden="true"></span>Objectif</li></ul><div class="pi-grille">{"".join(cartes)}</div>')
+    return ('<section class="pistes" aria-labelledby="t-pistes"><h2 id="t-pistes">Où économiser</h2>'
+            '<p class="intro">Tes dépenses variables, comparées à tes propres mois. L\'objectif proposé est à '
+            "mi-chemin entre ta moyenne et tes mois les plus sobres : un niveau que tu as déjà tenu. Un mois très cher "
+            "peut être un voyage ou un achat prévu : à toi de juger.</p>" + "".join(morceaux) + "</section>")
+
+
 def _livrets(d: dict) -> str:
     """Tes livrets : ce que tu y as mis, ce que tu en as repris, les intérêts, et le bilan (gain ou perte)."""
     livrets = d.get("livrets") or []
@@ -980,9 +1159,11 @@ def construire_page(donnees: dict, valeurs: dict[str, str] | None = None, detail
         _entete(donnees, personnelle)
         + _alerte(donnees)
         + _recap(donnees)
+        + _aujourdhui(donnees, valeurs)
         + f'<div class="colonnes">{_synthese(donnees, valeurs)}{_categories(donnees, valeurs, detail)}</div>'
         + _a_verifier(donnees, valeurs)
         + _ecart(donnees)
+        + _pistes(donnees, detail)
         + _livrets(donnees)
         + _par_mois(donnees, detail)
         + _proches(donnees, valeurs)
@@ -1108,6 +1289,10 @@ strong{font-weight:650}
 .alerte .ico{color:var(--alerte-icone);margin-top:2px}
 
 .recap{margin-top:clamp(32px,6vw,64px)}
+.aujourdhui{margin-top:clamp(32px,6vw,64px)}
+.aujourdhui .recap{margin-top:20px}
+.aujourdhui .hors-titre{margin-top:18px}
+.changements{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px;font-size:15px;color:var(--encre-2)}
 .recap-haut{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px 24px;margin-bottom:14px}
 .depense{font-size:21px;color:var(--encre-2);padding-bottom:10px}
 .depense strong{color:var(--encre)}
@@ -1295,6 +1480,39 @@ td.pourquoi{color:var(--encre-2)}
 .detail-cat details[open]>summary{background:var(--lagon-voile)}
 .detail-cat td.date{white-space:nowrap;color:var(--encre-3)}
 .livrets{margin-top:clamp(32px,6vw,64px)}
+.pistes{margin-top:clamp(32px,6vw,64px)}
+.pistes h3{margin:28px 0 6px;font-size:19px}
+.pi-total{display:flex;flex-direction:column;gap:2px;margin:4px 0 8px;font-size:15px;color:var(--encre-2)}
+.pi-total strong{font-size:40px;line-height:1.1;font-weight:650;color:var(--s3);font-variant-numeric:tabular-nums}
+.pi-regle{list-style:none;padding:0;margin:14px 0 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px 24px}
+.pi-regle li{display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:2px 10px;padding-top:12px;
+  border-top:2px solid var(--piste)}
+.pi-quoi{font-weight:600}
+.pi-regle strong{font-size:26px;line-height:1.1;font-variant-numeric:tabular-nums;grid-row:span 2;align-self:center}
+.pi-regle li.hors strong{color:var(--s2)}
+.pi-rep{font-size:13px;color:var(--encre-3);grid-column:1}
+.pi-jauge{grid-column:1/-1;position:relative;height:8px;margin:6px 0 4px;border-radius:999px;background:var(--piste)}
+.pi-jauge span{position:absolute;inset:0 auto 0 0;border-radius:999px}
+.pi-jauge span.dans{background:var(--lagon)}
+.pi-jauge span.hors{background:var(--s2)}
+.pi-jauge i{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;background:var(--encre)}
+.pi-contenu{grid-column:1/-1;font-size:13px;color:var(--encre-2)}
+.pistes .legende{margin:4px 0 12px}
+.pastille.au-dessus{background:var(--s2)}
+.pastille.en-dessous{background:var(--lagon)}
+.trait-objectif{display:inline-block;width:22px;height:0;border-top:2px dashed var(--encre);vertical-align:middle}
+.pi-grille{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px 28px}
+.piste{padding-top:14px;border-top:2px solid var(--piste);display:flex;flex-direction:column;gap:8px}
+.piste h3{margin:0}
+.pi-gain{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
+.pi-gain strong{font-size:30px;line-height:1.1;color:var(--s3);font-variant-numeric:tabular-nums}
+.pi-gain span,.pi-chers{color:var(--encre-2);font-size:14px}
+.pi-chiffres{font-size:15px}
+.pi-mois{width:100%;height:64px;display:block}
+.pi-mois .au-dessus{fill:var(--s2)}
+.pi-mois .en-dessous{fill:var(--lagon)}
+.pi-mois .objectif{stroke:var(--encre);stroke-width:1.5;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}
+.pi-conseil{font-family:var(--police-texte);font-size:15px;line-height:1.55}
 .lv-grille{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px 28px}
 .livret{padding-top:14px;border-top:2px solid var(--piste)}
 .lv-bilan{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:6px 0 14px}

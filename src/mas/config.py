@@ -123,9 +123,33 @@ class ConfigAnalyse(BaseModel):
     # Argent reçu de proches en plus de ce que tu leur as envoyé : « a_part » (montré, pas compté
     # comme un revenu) ou « revenu » (une aide régulière, par exemple)
     recus_de_proches: Literal["a_part", "revenu"] = "a_part"
+    # Proches qui gardent leur épargne sur ton compte (ils t'envoient de l'argent, tu le leur rends
+    # plus tard) : ces virements sont montrés à part, ni revenu ni dépense. Leur pseudonyme tel que le
+    # montre le rapport anonyme (PERSONNE_7), ou leur nom tel que tu le vois dans ta version
+    # personnelle (tous ses mots doivent figurer dans le libellé). Un nom donné ici est masqué comme
+    # les tiens.
+    epargne_de_proches: list[str] = Field(default_factory=list)
     # Ce que tu sais d'un commerçant : un mot de son libellé -> sa catégorie, à la place de celle de
     # l'IA (ex. « COLIN TEAM TOY: transport » pour un garage). Voir la section « À vérifier » du rapport.
     categories: dict[str, Categorie] = Field(default_factory=dict)
+
+
+class ConfigPaie(BaseModel):
+    # Tes bulletins de paie PDF, déposés dans ce dossier (sous-dossiers compris) : anonymisés, puis lus sur ton PC.
+    dossier: str | None = "fiches_de_paie"
+    # Un classeur Excel de paies, en complément des PDF : une feuille « Brut AAAA » (une colonne par ligne de paie,
+    # puis « Cotisations ») et une feuille « Net AAAA » (net avant impôt, net après impôt) par année
+    classeur: str | None = None
+    source_preferee: Literal["pdf", "classeur"] = "pdf"      # pour un mois présent des deux côtés
+    # Un libellé que mas range mal : un mot du libellé -> sa nature (base, mensuelle, treizieme, rappel, variable,
+    # interessement, exceptionnelle, frais, cet, absence, stage, autre)
+    natures: dict[str, str] = Field(default_factory=dict)
+    # Ce que ton employeur t'a annoncé, comparé aux bulletins (voir config.example.yaml)
+    annonces: list[dict] = Field(default_factory=list)
+    hausse_janvier: float | None = None    # prévision ; vide : la médiane de tes trois dernières années
+    hausse_avril: float | None = None
+    # Colonnes du bulletin (bord droit, en points) si mas ne les trouve pas seul : libelle, base, taux, retenue, gain
+    colonnes: dict[str, float] | None = None
 
 
 class Config(BaseModel):
@@ -137,6 +161,7 @@ class Config(BaseModel):
     coffre: ConfigCoffre = Field(default_factory=ConfigCoffre)
     recurrence: ConfigRecurrence = Field(default_factory=ConfigRecurrence)
     optimisation: ConfigOptimisation = Field(default_factory=ConfigOptimisation)
+    paie: ConfigPaie = Field(default_factory=ConfigPaie)
 
 
 def charger_config(chemin: str | Path | None = None) -> Config:

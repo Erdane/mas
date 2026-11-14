@@ -69,6 +69,11 @@ revenu. Dans le tableau mois par mois, un remboursement vient en déduction le m
 Pour sortir ces virements du budget, mets `virements_a_des_proches: a_part` dans la section
 `analyse` de `config.yaml` : ils sont alors montrés à part, ni en dépenses ni en revenus.
 
+Un proche qui garde son épargne sur ton compte (il t'envoie de l'argent, tu le lui rends quelques
+jours ou semaines plus tard) se déclare à part, dans `analyse.epargne_de_proches` : son pseudonyme
+tel que le montre le rapport anonyme, ou son nom. Seuls ses virements sont mis de côté, ni revenu ni
+dépense, et la page dit ce qui est encore chez toi. Les virements des autres proches ne changent pas.
+
 **À savoir :** comme les noms sont masqués, un virement à une nounou ou à un artisan arrive ici
 aussi. Un loyer régulier, lui, est repéré et compté dans Logement (voir plus haut).
 

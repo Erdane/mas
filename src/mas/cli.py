@@ -134,6 +134,37 @@ def ouvrir_dans_le_navigateur(page: Path) -> None:
         console.print(f"[yellow]Ouverture automatique impossible ({e}) : ouvre {page} à la main.[/yellow]")
 
 
+def _pages_paie(config, coffre, budget_json: Path | None, rafraichir_prix: bool | None = None,
+                dossier: Path = Path("rapports")) -> dict | None:
+    """Tes fiches de paie, s'il y en a (paie.dossier, paie.classeur) : leur page, et celle qui les croise avec le
+    budget. Une fuite dans un bulletin bloque ces pages-là, pas le rapport de budget."""
+    from .paie.anonymisation import FuiteDansUnBulletin
+    from .paie.chargement import a_des_bulletins
+    from .paie.sortie import ecrire_pages as ecrire_pages_paie
+
+    if not a_des_bulletins(config):
+        return None
+    try:
+        with console.status("Fiches de paie : anonymisation et lecture…") as statut:
+            res = ecrire_pages_paie(config, coffre, budget_json, dossier, rafraichir_prix,
+                                    lambda i, n, nom: statut.update(f"Fiches de paie : {i + 1}/{n}, anonymisation et lecture…"))
+    except FuiteDansUnBulletin as e:
+        console.print(f"[red]{e}[/red]")
+        return None
+    if res is None:
+        console.print("[yellow]Aucun bulletin lisible dans le dossier des fiches de paie.[/yellow]")
+        return None
+    d = res["analyse"]["donnees"]
+    console.print(f"Fiches de paie : {len(d.bulletins)} mois ({len(d.pdfs)} PDF, {len(d.classeur)} du classeur), "
+                  f"{d.remplacements} données personnelles masquées avant lecture.")
+    if d.pdf_ignores:
+        console.print(f"{len(d.pdf_ignores)} PDF ne sont pas des bulletins lisibles : laissés de côté.")
+    for nom, page in res["pages"].items():
+        if nom in ("paie", "croise"):
+            console.print(f"  {'Tes fiches de paie' if nom == 'paie' else 'Salaire et budget'} : [bold]{page}[/bold]")
+    return res
+
+
 def _ecrire_rapport(sortie: Path, resultat, traitement: dict, orchestrateur) -> Path:
     """Écrit les versions personnelle et anonyme (Markdown, HTML), affiche le rapport. Renvoie la page HTML."""
     from .page import donnees_rapport, ecrire_pages
@@ -146,7 +177,8 @@ def _ecrire_rapport(sortie: Path, resultat, traitement: dict, orchestrateur) -> 
     donnees = donnees_rapport(resultat.budget, resultat.analyse.classements, resultat.commentaire,
                               alertes, traitement, lectures=resultat.lectures,
                               operations=resultat.analyse.transactions, livrets=resultat.get("livrets"))
-    html, html_anonyme, _ = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
+    html, html_anonyme, chemin_json = ecrire_pages(sortie, donnees, orchestrateur.coffre.valeurs)
+    _pages_paie(orchestrateur.config, orchestrateur.coffre, chemin_json)
     for message in donnees["controles"]:
         console.print(f"[yellow]⚠ {message}[/yellow]")
     if len(alertes) > len(donnees["controles"]):
@@ -421,6 +453,9 @@ def exporter(
         donnees = json.loads(donnees_json.read_text(encoding="utf-8"))
         valeurs = Coffre(charger_config(config).coffre.chemin).valeurs
         html, html_anonyme, _ = ecrire_pages(base, donnees, valeurs, ecrire_donnees=False)
+        from .paie.sortie import relier
+
+        relier(base)                 # le menu vers les pages des fiches de paie, si elles existent
         console.print(f"Pages régénérées : [bold]{html}[/bold] et [bold]{html_anonyme}[/bold]")
         return
 
@@ -432,6 +467,38 @@ def exporter(
         raise typer.Exit(1)
     html = ecrire_html(rapport, rapport.read_text(encoding="utf-8"), anonyme="_anonyme" in rapport.stem)
     console.print(f"HTML écrit dans [bold]{html}[/bold] (mise en page simple : pas de {donnees_json.name})")
+
+
+@app.command()
+def payslips(
+    budget: Path | None = typer.Option(None, "--budget", help="Le rapport de budget à croiser (rapport_X.json) ; par "
+                                       "défaut, le plus récent de rapports/"),
+    alone: bool = typer.Option(False, "--alone", help="La page des bulletins seule, sans la croiser avec un budget"),
+    refresh_prices: bool = typer.Option(False, "--refresh-prices", help="Retélécharger l'indice des prix de l'INSEE"),
+    ouvrir: bool = typer.Option(True, "--open/--no-open", help="Ouvrir la page à la fin"),
+    config: Path = OptionConfig,
+):
+    """Tes fiches de paie (dossier paie.dossier, classeur paie.classeur), anonymisées puis lues sur ton PC, sans IA :
+    leur page, et celle qui les croise avec ton budget."""
+    from .anonymisation import Coffre
+    from .paie.sortie import dernier_budget
+
+    cfg = _config_personnelle(config)
+    rapports = Path("rapports")
+    if not alone and budget is None:
+        budget = dernier_budget(rapports)
+    if budget is not None and not budget.exists():
+        console.print(f"[red]Rapport introuvable : {budget}[/red]")
+        raise typer.Exit(1)
+    res = _pages_paie(cfg, Coffre(cfg.coffre.chemin), None if alone else budget, True if refresh_prices else None, rapports)
+    if res is None:
+        console.print(f"Dépose tes bulletins PDF dans [bold]{cfg.paie.dossier}[/bold] (ou indique ton classeur dans "
+                      "paie.classeur), puis relance.")
+        raise typer.Exit(1)
+    if budget is None and not alone:
+        console.print("Pas encore de rapport de budget dans rapports/ : la page des bulletins seule.")
+    if ouvrir:
+        ouvrir_dans_le_navigateur(res["pages"]["paie"])
 
 
 @app.command()

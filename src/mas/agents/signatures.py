@@ -86,7 +86,12 @@ class RedigerSynthese(dspy.Signature):
     Les chiffres fournis sont exacts : ne les recalcule pas, ne les invente pas.
     Garde les jetons entre crochets ([PERSONNE_1]...) tels quels.
     Structure : un paragraphe de constat, puis 3 à 5 pistes concrètes d'économies
-    portant sur les abonnements optionnels et les postes variables."""
+    portant sur les abonnements optionnels et les postes variables. Pour les postes variables
+    (restaurants, shopping, vacances et sorties…), reprends les objectifs et les économies de la
+    section « Pistes d'économie » : dis où la personne dépense le plus par rapport à ses propres
+    mois, et ce que l'objectif lui ferait gagner par mois. Si la section « Ton budget aujourd'hui »
+    est présente, c'est elle qui dit où en est la personne maintenant (charges fixes à leur montant
+    actuel) : la moyenne décrit le passé. Explique l'écart entre les deux par ce qui a changé."""
 
     resume_chiffre: str = dspy.InputField()
     synthese: str = dspy.OutputField(desc="Markdown, 150 à 300 mots")

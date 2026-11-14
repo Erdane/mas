@@ -2,6 +2,10 @@
 
 Une ligne par commit, écrite par Claude à partir des changements.
 
+## 2026-11-14
+
+- Ajoute l'analyse de tes fiches de paie, ton budget d'aujourd'hui et tes pistes d'économie
+
 ## 2026-11-09
 
 - Ajoute les livrets et visualise les dépenses obligatoires dans le budget mensuel

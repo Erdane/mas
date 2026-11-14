@@ -39,10 +39,19 @@ analyse:
   # Argent reçu de proches en plus de ce que tu leur as envoyé : a_part (montré, pas compté comme un
   # revenu) ou revenu (une aide régulière, par exemple).
   recus_de_proches: a_part
+  # Proches qui gardent leur épargne sur ton compte (ils t'envoient de l'argent, tu le leur rends plus
+  # tard) : ces virements sont montrés à part, ni revenu ni dépense. Leur pseudonyme tel que le montre le
+  # rapport anonyme, ou leur nom tel que tu le vois dans ta version personnelle (tous ses mots doivent
+  # figurer dans le libellé : le nom complet évite d'attraper un homonyme). Un nom donné ici est masqué
+  # comme les tiens. Ce fichier reste sur ton ordinateur : la liste n'est jamais publiée.
+  epargne_de_proches: []
+  #   - PERSONNE_7
+  #   - Camille Martin
   # Ce que tu sais d'un commerçant (voir « À vérifier » dans le rapport) : un mot de son libellé, ou son
   # vrai nom tel que tu le vois dans ta version personnelle -> sa catégorie. Remplace celle de l'IA.
   categories: {}
   #   GARAGE MARTIN: transport
+  #   FINANCEMENT XYZ: credit      # une mensualité que mas ne reconnaît pas : comptée en charge fixe
 
 # --- Tes propres données : elles ne doivent JAMAIS sortir. ---
 # Elles sont recherchées en plus de la détection automatique, puis contrôlées
@@ -98,6 +107,30 @@ coffre:
   # Table pseudonyme -> valeur réelle, chiffrée (Fernet). La clé est lue dans
   # la variable MAS_CLE_COFFRE, sinon générée dans ~/.mas/cle.key
   chemin: ~/.mas/coffre.bin
+
+# Tes fiches de paie (facultatif, `mas payslips`) : dépose tes bulletins PDF dans ce dossier. Ils sont anonymisés
+# sur ton PC comme tes relevés, puis lus sans IA. Avec un rapport de budget, une page les croise avec lui.
+paie:
+  dossier: fiches_de_paie        # sous-dossiers compris ; ignoré par git
+  classeur:                      # facultatif : un classeur Excel « Brut AAAA » / « Net AAAA », pour les mois sans PDF
+  source_preferee: pdf           # pour un mois présent des deux côtés : pdf ou classeur
+  natures: {}                    # un libellé mal rangé : un mot du libellé -> sa nature
+  #  PRIME DE VACANCES: treizieme   # (base, mensuelle, treizieme, rappel, variable, interessement, exceptionnelle,
+  #                                 #  frais, cet, absence, stage, autre)
+  annonces: []                   # ce que ton employeur t'a annoncé, comparé à tes bulletins
+  #  - mois: 2026-01
+  #    augmentation: 1.5          # en %, sur le salaire de base, à partir de ce mois
+  #  - mois: 2026-04
+  #    salaire_base: 3000         # le salaire de base mensuel annoncé à partir de ce mois
+  #  - annee: 2026
+  #    ligne: variable            # un mot du libellé de la ligne de paie
+  #    montant: 2500
+  #  - annee: 2026
+  #    remuneration_annuelle: 42000   # brut annuel annoncé, hors frais remboursés
+  hausse_janvier:                # prévision, en % ; vide : la médiane de tes trois dernières années
+  hausse_avril:                  # en %, versée avec un rappel depuis janvier
+  colonnes:                      # si mas ne trouve pas seul les colonnes du bulletin (bord droit, en points) :
+  #  {libelle: 285, base: 340, taux: 390, retenue: 450, gain: 520}
 
 recurrence:
   occurrences_min: 3             # abaissé automatiquement si peu de mois couverts
